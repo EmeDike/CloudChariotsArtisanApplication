@@ -1,0 +1,45 @@
+service: "Artisan-application-python-http-api"
+frameworkVersion: '3'
+provider:
+  name: aws
+  runtime: python3.9
+  region: ${self:custom.${self:provider.stage}.region}
+  stage: ${opt:stage, self:custom.defaultEnv}
+  timeout: 15
+  memorySize: 128
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - ssm:GetParameters
+          Resource: "arn:aws:ssm:eu-west-2:628479575487:parameter/DB_*"
+functions:
+  getAllPackage:
+    handler: handler.getAllPackage
+    events:
+      - httpApi:
+          path: /packages
+          method: get
+plugins:
+  - serverless-python-requirements
+  - serverless-offline
+  - serverless-prune-plugin
+custom:
+  prune:
+    automatic: true
+    number: 3
+  defaultEnv: qa
+  hub:
+    region: eu-west-2
+  dev:
+    region: eu-west-2
+    profile: dev
+  qa:
+    region: eu-west-2
+    profile: qa
+  prod:
+    region: eu-west-2
+    profile: prod
+  pythonRequirements:
+    dockerizePip: non-linux
