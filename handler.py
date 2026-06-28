@@ -5,7 +5,7 @@ from datetime import datetime
 
 import boto3
 import pymysql
-from urllib3.util import connection
+from db_operations import db, connection
 
 import auxfunct
 from db_operations import db
