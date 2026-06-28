@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 
 import boto3
+import pymysql
 from urllib3.util import connection
 
 import auxfunct
@@ -894,7 +895,7 @@ def createJobRequest(event, context):
                 })
             }
 
-        with connection.cursor() as cursor:
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
 
             cursor.execute(
                 """
@@ -960,7 +961,10 @@ def createJobRequest(event, context):
 
     except Exception as e:
 
-        connection.rollback()
+        try:
+            connection.rollback()
+        except:
+            pass
 
         return {
             "statusCode": 500,
@@ -996,7 +1000,7 @@ def updateJobRequestStatus(event, context):
                 })
             }
 
-        with connection.cursor() as cursor:
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
 
             cursor.execute(
                 """
@@ -1138,7 +1142,7 @@ def updateJobRequestStatus(event, context):
                         """
                     )
             except Exception as email_error:
-                print(f"Email failed: {email_error}")  # log but don't fail the request
+                print(f"Email failed: {email_error}")
 
         return {
             "statusCode": 200,
@@ -1165,6 +1169,7 @@ def updateJobRequestStatus(event, context):
                 "error": str(e)
             })
         }
+
 
 def createBooking(event, context):
 
@@ -1200,7 +1205,7 @@ def createBooking(event, context):
                 })
             }
 
-        with connection.cursor() as cursor:
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
 
             cursor.execute(
                 """
@@ -1345,7 +1350,10 @@ def createBooking(event, context):
 
     except Exception as e:
 
-        connection.rollback()
+        try:
+            connection.rollback()
+        except:
+            pass
 
         return {
             "statusCode": 500,

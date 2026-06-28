@@ -360,3 +360,5 @@ database_config = {
 }
 
 db = DBOperations(database_config)
+# add this line
+connection = db.connection

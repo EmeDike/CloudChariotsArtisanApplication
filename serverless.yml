@@ -62,6 +62,14 @@ functions:
           path: /createJobRequest
           method: post
 
+  updateJobRequestStatus:
+    handler: handler.updateJobRequestStatus
+    events:
+      - httpApi:
+          path: /updateJobRequestStatus
+          method: post
+
+
 
 plugins:
   - serverless-python-requirements
