@@ -5,6 +5,7 @@ from datetime import datetime
 
 import boto3
 
+import auxfunct
 from db_operations import db
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,7 @@ COGNITO_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID")
 COGNITO_REGION = os.environ.get("AWS_REGION", "eu-west-2")
 
 HTTP_OK = 200
+HTTP_FORBIDDEN = 403
 HTTP_CREATED = 201
 HTTP_BAD_REQUEST = 400
 HTTP_UNAUTHORIZED = 401
@@ -282,142 +284,6 @@ def register(event, context):
             }
         )
 
-def login(event, context):
-    try:
-
-        body_data = json.loads(event.get("body", "{}"))
-
-        email = body_data.get(
-            "email",
-            ""
-        ).strip().lower()
-
-        password = body_data.get(
-            "password",
-            ""
-        )
-
-        if not email:
-            return construct_response(
-                HTTP_BAD_REQUEST,
-                {
-                    "error": "Email is required."
-                }
-            )
-
-        if not password:
-            return construct_response(
-                HTTP_BAD_REQUEST,
-                {
-                    "error": "Password is required."
-                }
-            )
-
-        cognito_client = get_cognito_client()
-
-        try:
-
-            auth_response = cognito_client.initiate_auth(
-                ClientId=COGNITO_CLIENT_ID,
-                AuthFlow="USER_PASSWORD_AUTH",
-                AuthParameters={
-                    "USERNAME": email,
-                    "PASSWORD": password
-                }
-            )
-
-        except cognito_client.exceptions.NotAuthorizedException:
-
-            return construct_response(
-                HTTP_UNAUTHORIZED,
-                {
-                    "error": "Incorrect email or password."
-                }
-            )
-
-        except cognito_client.exceptions.UserNotFoundException:
-
-            return construct_response(
-                HTTP_UNAUTHORIZED,
-                {
-                    "error": "Incorrect email or password."
-                }
-            )
-
-        except cognito_client.exceptions.UserNotConfirmedException:
-
-            return construct_response(
-                HTTP_BAD_REQUEST,
-                {
-                    "error": "Please verify your email before logging in."
-                }
-            )
-
-        except cognito_client.exceptions.PasswordResetRequiredException:
-
-            return construct_response(
-                HTTP_BAD_REQUEST,
-                {
-                    "error": "Password reset required."
-                }
-            )
-
-        tokens = auth_response["AuthenticationResult"]
-
-        user_response = cognito_client.get_user(
-            AccessToken=tokens["AccessToken"]
-        )
-
-        attrs = {
-            attr["Name"]: attr["Value"]
-            for attr in user_response["UserAttributes"]
-        }
-
-        logger.info(
-            "User login successful: %s",
-            email
-        )
-
-        return construct_response(
-            HTTP_OK,
-            {
-                "message": "Login successful.",
-                "access_token": tokens["AccessToken"],
-                "id_token": tokens["IdToken"],
-                "refresh_token": tokens.get("RefreshToken"),
-                "expires_in": tokens["ExpiresIn"],
-                "token_type": tokens["TokenType"],
-                "user": {
-                    "id": attrs.get("sub"),
-                    "email": attrs.get("email"),
-                    "name": attrs.get("name"),
-                    "role": attrs.get("custom:role"),
-                    "email_verified": (
-                        attrs.get("email_verified") == "true"
-                    )
-                }
-            }
-        )
-
-    except json.JSONDecodeError:
-
-        return construct_response(
-            HTTP_BAD_REQUEST,
-            {
-                "error": "Invalid JSON format."
-            }
-        )
-
-    except Exception:
-
-        logger.exception("login() failed")
-
-        return construct_response(
-            HTTP_INTERNAL_ERROR,
-            {
-                "error": "Internal server error."
-            }
-        )
 
 def forgot_password(event, context):
     try:
@@ -643,3 +509,504 @@ def reset_password(event, context):
                 "error": "Internal server error."
             }
         )
+def user_login(event, context):
+    cognito_client = boto3.client(
+        "cognito-idp",
+        region_name=COGNITO_REGION
+    )
+
+    try:
+        body = event.get("body", "{}")
+        if isinstance(body, str):
+            body = json.loads(body)
+
+        email = (body.get("email") or "").strip().lower()
+        password = body.get("password") or ""
+        expected_role = (body.get("role") or "").strip().lower()
+
+        if not email:
+            return construct_response(
+                HTTP_BAD_REQUEST,
+                {"message": "Email is required."}
+            )
+
+        if not password:
+            return construct_response(
+                HTTP_BAD_REQUEST,
+                {"message": "Password is required."}
+            )
+
+        if expected_role not in ["customer", "artisan", "courier", "admin"]:
+            return construct_response(
+                HTTP_BAD_REQUEST,
+                {"message": "A valid role is required."}
+            )
+
+        response = cognito_client.initiate_auth(
+            ClientId=COGNITO_CLIENT_ID,
+            AuthFlow="USER_PASSWORD_AUTH",
+            AuthParameters={
+                "USERNAME": email,
+                "PASSWORD": password
+            }
+        )
+
+        logger.info("User %s authenticated successfully.", email)
+
+        if "ChallengeName" in response:
+            return construct_response(
+                HTTP_OK,
+                {
+                    "message": "Additional authentication step required.",
+                    "challenge_name": response["ChallengeName"],
+                    "session": response.get("Session")
+                }
+            )
+
+        cognito_sub = get_cognito_sub(email)
+
+        if not cognito_sub:
+            return construct_response(
+                HTTP_INTERNAL_ERROR,
+                {"message": "Unable to retrieve user information."}
+            )
+
+        user_result = db.get_user_by_cognito_sub(cognito_sub)
+
+        if user_result["statusCode"] != HTTP_OK:
+            return construct_response(
+                HTTP_NOT_FOUND,
+                {"message": "User record not found."}
+            )
+
+        user = user_result["body"]
+
+        if user["role"].lower() != expected_role:
+            logger.warning(
+                "Access denied for %s. Expected role=%s, actual role=%s",
+                email,
+                expected_role,
+                user["role"]
+            )
+
+            return construct_response(
+                HTTP_FORBIDDEN,
+                {
+                    "message": "Access denied.",
+                    "expected_role": expected_role,
+                    "actual_role": user["role"]
+                }
+            )
+
+        if not user["is_active"]:
+            return construct_response(
+                HTTP_FORBIDDEN,
+                {"message": "Your account has been deactivated."}
+            )
+
+        authentication = response["AuthenticationResult"]
+
+        return construct_response(
+            HTTP_OK,
+            {
+                "message": "Login successful.",
+                "user": {
+                    "user_id": user["user_id"],
+                    "email": user["email"],
+                    "role": user["role"],
+                    "cognito_sub": user["cognito_sub"]
+                },
+                "access_token": authentication["AccessToken"],
+                "id_token": authentication["IdToken"],
+                "refresh_token": authentication.get("RefreshToken"),
+                "expires_in": authentication["ExpiresIn"],
+                "token_type": authentication["TokenType"]
+            }
+        )
+
+    except json.JSONDecodeError:
+        return construct_response(
+            HTTP_BAD_REQUEST,
+            {"message": "Invalid JSON body."}
+        )
+
+    except cognito_client.exceptions.NotAuthorizedException:
+        return construct_response(
+            401,
+            {"message": "Invalid email or password."}
+        )
+
+    except cognito_client.exceptions.UserNotFoundException:
+        return construct_response(
+            HTTP_NOT_FOUND,
+            {"message": "User not found."}
+        )
+
+    except cognito_client.exceptions.UserNotConfirmedException:
+        return construct_response(
+            HTTP_FORBIDDEN,
+            {"message": "Account has not been confirmed."}
+        )
+
+    except cognito_client.exceptions.PasswordResetRequiredException:
+        return construct_response(
+            HTTP_FORBIDDEN,
+            {"message": "Password reset is required."}
+        )
+
+    except Exception as e:
+        logger.exception("Login failed for %s", email if "email" in locals() else "unknown")
+
+        return construct_response(
+            HTTP_INTERNAL_ERROR,
+            {
+                "message": "Internal server error.",
+                "error": str(e)
+            }
+        )
+
+def registerArtisan(event, context):
+    try:
+        # 1. Parse request
+        body = event.get("body")
+        body_data = body if isinstance(body, dict) else json.loads(body)
+
+        # 2. Validate Address fields (matches tbl_address schema)
+        required_address_fields = ["label", "address", "city", "state", "latitude", "longitude"]
+        address_data = {k: body_data.get(k) for k in required_address_fields}
+        missing_address = [k for k, v in address_data.items() if v is None]
+        if missing_address:
+            return construct_response(HTTP_BAD_REQUEST, {"error": f"Missing address fields: {', '.join(missing_address)}"})
+
+        # 3. Validate Artisan fields (matches tbl_users + tbl_artisan schema)
+        required_artisan_fields = [
+            "first_name", "last_name", "email", "phone_number", "password",
+            "business_name", "years_of_experience", "bio"
+        ]
+        artisan_data = {k: body_data.get(k) for k in required_artisan_fields}
+        missing_artisan = [k for k, v in artisan_data.items() if v is None]
+        if missing_artisan:
+            return construct_response(HTTP_BAD_REQUEST, {"error": f"Missing artisan fields: {', '.join(missing_artisan)}"})
+
+        # 4. Validate years_of_experience is a non-negative integer
+        try:
+            artisan_data["years_of_experience"] = int(artisan_data["years_of_experience"])
+            if artisan_data["years_of_experience"] < 0:
+                raise ValueError
+        except (ValueError, TypeError):
+            return construct_response(HTTP_BAD_REQUEST, {"error": "years_of_experience must be a non-negative integer."})
+
+        # 5. Password validation
+        if not auxfunct.validate_password(artisan_data["password"]):
+            return construct_response(HTTP_BAD_REQUEST, {
+                "error": "Password must be at least 8 characters long and contain letters and numbers."
+            })
+
+        # 6. Create Cognito user
+        full_name = f"{artisan_data['first_name']} {artisan_data['last_name']}"
+        cognito_client = boto3.client('cognito-idp', region_name=COGNITO_REGION)
+        try:
+            cognito_client.admin_create_user(
+                UserPoolId=COGNITO_POOL_ID,
+                Username=artisan_data["email"],
+                UserAttributes=[
+                    {'Name': 'email',          'Value': artisan_data["email"]},
+                    {'Name': 'phone_number',   'Value': artisan_data["phone_number"]},
+                    {'Name': 'name',           'Value': full_name},
+                    {'Name': 'email_verified', 'Value': 'true'}
+                ],
+                TemporaryPassword=artisan_data["password"],
+                MessageAction='SUPPRESS'
+            )
+            cognito_client.admin_set_user_password(
+                UserPoolId=COGNITO_POOL_ID,
+                Username=artisan_data["email"],
+                Password=artisan_data["password"],
+                Permanent=True
+            )
+        except cognito_client.exceptions.UsernameExistsException:
+            return construct_response(HTTP_BAD_REQUEST, {"error": f"Artisan with email {artisan_data['email']} already exists in Cognito."})
+
+        # 7. Fetch Cognito sub
+        cognito_sub = get_cognito_sub(artisan_data["email"])
+        if not cognito_sub:
+            return construct_response(HTTP_INTERNAL_ERROR, {"error": "Failed to retrieve Cognito sub."})
+
+        # 8. Insert into tbl_users first (tbl_artisan.user_id is a FK to tbl_users)
+        users_data = {
+            "cognito_sub":  cognito_sub,
+            "first_name":   artisan_data["first_name"],
+            "last_name":    artisan_data["last_name"],
+            "email":        artisan_data["email"],
+            "phone_number": artisan_data["phone_number"],
+            "role":         "artisan",
+            "is_active":    1,
+            "created_at":   datetime.now(),
+            "updated_at":   datetime.now()
+        }
+        user_result = db.insert_user(users_data)
+        if user_result["statusCode"] != HTTP_OK:
+            return construct_response(user_result["statusCode"], user_result["body"])
+        user_id = user_result["body"].get("user_id")
+
+        # 9. Insert Address into DB (tbl_address.user_id links to tbl_users)
+        address_data["user_id"] = user_id
+        address_result = db.insert_address(address_data)
+        if address_result["statusCode"] != HTTP_OK:
+            return construct_response(address_result["statusCode"], address_result["body"])
+
+        # 10. Insert Artisan profile into DB (tbl_artisan)
+        artisan_db_payload = {
+            "user_id":             user_id,
+            "business_name":       artisan_data["business_name"],
+            "years_of_experience": artisan_data["years_of_experience"],
+            "bio":                 artisan_data["bio"],
+            "average_rating":      0.00,
+            "total_reviews":       0,
+            "verification_status": "pending",
+            "is_available":        1,
+            "created_at":          datetime.now(),
+            "updated_at":          datetime.now()
+        }
+        artisan_result = db.insert_artisan(artisan_db_payload)
+        if artisan_result["statusCode"] != HTTP_OK:
+            return construct_response(artisan_result["statusCode"], artisan_result["body"])
+        artisan_id = artisan_result["body"].get("artisan_id")
+
+        # 11. Create Wallet for Artisan
+        wallet_data = {
+            "owner_id":   artisan_id,
+            "owner_type": "artisan",
+            "currency":   "NGN",
+            "balance":    0.00,
+            "status":     "active"
+        }
+        wallet_result = db.insert_wallet(wallet_data)
+
+        # 12. Success Response
+        return construct_response(HTTP_CREATED, {
+            "message":     "Artisan registered successfully.",
+            "user_id":     user_id,
+            "artisan_id":  artisan_id,
+            "wallet_id":   wallet_result["body"].get("wallet_id"),
+            "cognito_sub": cognito_sub
+        })
+
+    except json.JSONDecodeError:
+        return construct_response(HTTP_BAD_REQUEST, {"error": "Invalid JSON format."})
+    except Exception as e:
+        logger.exception("Internal Server Error")
+        return construct_response(HTTP_INTERNAL_ERROR, {"error": f"Internal Server Error: {str(e)}"})
+
+def registerCustomer(event, context):
+    try:
+        # 1. Parse request
+        body = event.get("body")
+        body_data = body if isinstance(body, dict) else json.loads(body)
+
+        # 2. Validate Address fields (matches tbl_address schema)
+        required_address_fields = ["label", "address", "city", "state", "latitude", "longitude"]
+        address_data = {k: body_data.get(k) for k in required_address_fields}
+        missing_address = [k for k, v in address_data.items() if v is None]
+        if missing_address:
+            return construct_response(HTTP_BAD_REQUEST, {"error": f"Missing address fields: {', '.join(missing_address)}"})
+
+        # 3. Validate Customer fields (matches tbl_users schema)
+        required_customer_fields = ["first_name", "last_name", "email", "phone_number", "password"]
+        customer_data = {k: body_data.get(k) for k in required_customer_fields}
+        missing_customer = [k for k, v in customer_data.items() if v is None]
+        if missing_customer:
+            return construct_response(HTTP_BAD_REQUEST, {"error": f"Missing customer fields: {', '.join(missing_customer)}"})
+
+        # 4. Password validation
+        if not auxfunct.validate_password(customer_data["password"]):
+            return construct_response(HTTP_BAD_REQUEST, {
+                "error": "Password must be at least 8 characters long and contain letters and numbers."
+            })
+
+        # 5. Create Cognito user
+        full_name = f"{customer_data['first_name']} {customer_data['last_name']}"
+        cognito_client = boto3.client('cognito-idp', region_name=COGNITO_REGION)
+        try:
+            cognito_client.admin_create_user(
+                UserPoolId=COGNITO_POOL_ID,
+                Username=customer_data["email"],
+                UserAttributes=[
+                    {'Name': 'email',          'Value': customer_data["email"]},
+                    {'Name': 'phone_number',   'Value': customer_data["phone_number"]},
+                    {'Name': 'name',           'Value': full_name},
+                    {'Name': 'email_verified', 'Value': 'true'}
+                ],
+                TemporaryPassword=customer_data["password"],
+                MessageAction='SUPPRESS'
+            )
+            cognito_client.admin_set_user_password(
+                UserPoolId=COGNITO_POOL_ID,
+                Username=customer_data["email"],
+                Password=customer_data["password"],
+                Permanent=True
+            )
+        except cognito_client.exceptions.UsernameExistsException:
+            return construct_response(HTTP_BAD_REQUEST, {"error": f"Customer with email {customer_data['email']} already exists in Cognito."})
+
+        # 6. Fetch Cognito sub
+        cognito_sub = get_cognito_sub(customer_data["email"])
+        if not cognito_sub:
+            return construct_response(HTTP_INTERNAL_ERROR, {"error": "Failed to retrieve Cognito sub."})
+
+        # 7. Insert into tbl_users first (tbl_customers.user_id is a FK to tbl_users)
+        users_data = {
+            "cognito_sub":  cognito_sub,
+            "first_name":   customer_data["first_name"],
+            "last_name":    customer_data["last_name"],
+            "email":        customer_data["email"],
+            "phone_number": customer_data["phone_number"],
+            "role":         "customer",
+            "is_active":    1,
+            "created_at":   datetime.now(),
+            "updated_at":   datetime.now()
+        }
+        user_result = db.insert_user(users_data)
+        if user_result["statusCode"] != HTTP_OK:
+            return construct_response(user_result["statusCode"], user_result["body"])
+        user_id = user_result["body"].get("user_id")
+
+        # 8. Insert Address into DB (tbl_address.user_id links to tbl_users)
+        address_data["user_id"] = user_id
+        address_result = db.insert_address(address_data)
+        if address_result["statusCode"] != HTTP_OK:
+            return construct_response(address_result["statusCode"], address_result["body"])
+
+        # 9. Insert Customer profile into DB (tbl_customers)
+        # - cognito_sub stored here directly as per tbl_customers schema
+        # - player_id left as None (nullable) until push notification service is integrated
+        # - profile_image left as None (nullable) until upload flow is implemented
+        # - status defaults to "active" — customers are immediately usable unlike artisans
+        customer_db_payload = {
+            "user_id":       user_id,
+            "cognito_sub":   cognito_sub,
+            "player_id":     None,
+            "profile_image": None,
+            "status":        "active",
+            "created_at":    datetime.now(),
+            "updated_at":    datetime.now()
+        }
+        customer_result = db.insert_customer(customer_db_payload)
+        if customer_result["statusCode"] != HTTP_OK:
+            return construct_response(customer_result["statusCode"], customer_result["body"])
+        customer_id = customer_result["body"].get("customer_id")
+
+        # 10. Success Response
+        return construct_response(HTTP_CREATED, {
+            "message":     "Customer registered successfully.",
+            "user_id":     user_id,
+            "customer_id": customer_id,
+            "cognito_sub": cognito_sub
+        })
+
+    except json.JSONDecodeError:
+        return construct_response(HTTP_BAD_REQUEST, {"error": "Invalid JSON format."})
+    except Exception as e:
+        logger.exception("Internal Server Error")
+        return construct_response(HTTP_INTERNAL_ERROR, {"error": f"Internal Server Error: {str(e)}"})
+
+
+def registerAdmin(event, context):
+    try:
+        # 1. Parse request
+        body = event.get("body")
+        body_data = body if isinstance(body, dict) else json.loads(body)
+
+        # 2. Validate Admin fields (matches tbl_users + tbl_admins schema)
+        required_admin_fields = [
+            "first_name", "last_name", "email", "phone_number", "password",
+            "department", "designation"
+        ]
+        admin_data = {k: body_data.get(k) for k in required_admin_fields}
+        missing_admin = [k for k, v in admin_data.items() if v is None]
+        if missing_admin:
+            return construct_response(HTTP_BAD_REQUEST, {"error": f"Missing admin fields: {', '.join(missing_admin)}"})
+
+        # 3. Password validation
+        if not auxfunct.validate_password(admin_data["password"]):
+            return construct_response(HTTP_BAD_REQUEST, {
+                "error": "Password must be at least 8 characters long and contain letters and numbers."
+            })
+
+        # 4. Create Cognito user
+        full_name = f"{admin_data['first_name']} {admin_data['last_name']}"
+        cognito_client = boto3.client('cognito-idp', region_name=COGNITO_REGION)
+        try:
+            cognito_client.admin_create_user(
+                UserPoolId=COGNITO_POOL_ID,
+                Username=admin_data["email"],
+                UserAttributes=[
+                    {'Name': 'email',          'Value': admin_data["email"]},
+                    {'Name': 'phone_number',   'Value': admin_data["phone_number"]},
+                    {'Name': 'name',           'Value': full_name},
+                    {'Name': 'email_verified', 'Value': 'true'}
+                ],
+                TemporaryPassword=admin_data["password"],
+                MessageAction='SUPPRESS'
+            )
+            cognito_client.admin_set_user_password(
+                UserPoolId=COGNITO_POOL_ID,
+                Username=admin_data["email"],
+                Password=admin_data["password"],
+                Permanent=True
+            )
+        except cognito_client.exceptions.UsernameExistsException:
+            return construct_response(HTTP_BAD_REQUEST, {"error": f"Admin with email {admin_data['email']} already exists in Cognito."})
+
+        # 5. Fetch Cognito sub
+        cognito_sub = get_cognito_sub(admin_data["email"])
+        if not cognito_sub:
+            return construct_response(HTTP_INTERNAL_ERROR, {"error": "Failed to retrieve Cognito sub."})
+
+        # 6. Insert into tbl_users first (tbl_admins.user_id is a FK to tbl_users)
+        users_data = {
+            "cognito_sub":  cognito_sub,
+            "first_name":   admin_data["first_name"],
+            "last_name":    admin_data["last_name"],
+            "email":        admin_data["email"],
+            "phone_number": admin_data["phone_number"],
+            "role":         "admin",
+            "is_active":    1,
+            "created_at":   datetime.now(),
+            "updated_at":   datetime.now()
+        }
+        user_result = db.insert_user(users_data)
+        if user_result["statusCode"] != HTTP_OK:
+            return construct_response(user_result["statusCode"], user_result["body"])
+        user_id = user_result["body"].get("user_id")
+
+        # 7. Insert Admin profile into DB (tbl_admins)
+        # - cognito_sub stored here directly as per tbl_admins schema
+        # - department e.g. "Operations", "Finance", "Technical"
+        # - designation e.g. "Super Admin", "Support Agent", "Manager"
+        admin_db_payload = {
+            "user_id":     user_id,
+            "cognito_sub": cognito_sub,
+            "department":  admin_data["department"],
+            "designation": admin_data["designation"],
+            "created_at":  datetime.now(),
+            "updated_at":  datetime.now()
+        }
+        admin_result = db.insert_admin(admin_db_payload)
+        if admin_result["statusCode"] != HTTP_OK:
+            return construct_response(admin_result["statusCode"], admin_result["body"])
+        admin_id = admin_result["body"].get("admin_id")
+
+        # 8. Success Response
+        return construct_response(HTTP_CREATED, {
+            "message":     "Admin registered successfully.",
+            "user_id":     user_id,
+            "admin_id":    admin_id,
+            "cognito_sub": cognito_sub
+        })
+
+    except json.JSONDecodeError:
+        return construct_response(HTTP_BAD_REQUEST, {"error": "Invalid JSON format."})
+    except Exception as e:
+        logger.exception("Internal Server Error")
+        return construct_response(HTTP_INTERNAL_ERROR, {"error": f"Internal Server Error: {str(e)}"})

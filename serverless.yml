@@ -15,12 +15,38 @@ provider:
             - ssm:GetParameters
           Resource: "arn:aws:ssm:eu-west-2:628479575487:parameter/DB_*"
 functions:
-  getAllPackage:
-    handler: handler.getAllPackage
+  user_login:
+    handler: handler.user_login
     events:
       - httpApi:
-          path: /packages
-          method: get
+          path: /user_login
+          method: post
+
+  registerArtisan:
+    handler: handler.registerArtisan
+    events:
+      - httpApi:
+          path: /registerArtisan
+          method: post
+
+  registerCustomer:
+    handler: handler.registerCustomer
+    events:
+      - httpApi:
+          path: /registerCustomer
+          method: post
+
+  registerAdmin:
+    handler: handler.registerAdmin
+    events:
+      - httpApi:
+          path: /registerAdmin
+          method: post
+
+
+
+
+
 plugins:
   - serverless-python-requirements
   - serverless-offline
