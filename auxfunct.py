@@ -1,11 +1,11 @@
 import re
 import boto3
 
-ses = boto3.client("ses", region_name="us-east-1")  # your AWS region
+ses = boto3.client("ses", region_name="eu-west-2")  # ← change region from us-east-1
 
 def send_email(to_email, subject, body):
     ses.send_email(
-        Source="noreply@yourdomain.com",  # must be verified in SES
+        Source="dicksoneme22@gmail.com",  # ← change to your verified email
         Destination={
             "ToAddresses": [to_email]
         },
@@ -18,14 +18,6 @@ def send_email(to_email, subject, body):
     )
 
 def validate_password(password: str) -> bool:
-    """
-    Password must:
-    - Be at least 8 characters long
-    - Contain at least one uppercase letter
-    - Contain at least one lowercase letter
-    - Contain at least one digit
-    - Contain at least one special character
-    """
     if not password or len(password) < 8:
         return False
     if not re.search(r'[A-Z]', password):

@@ -1042,7 +1042,7 @@ def updateJobRequestStatus(event, context):
                 SELECT
                     job_request_id,
                     customer_id,
-                    request_status,
+                    status,
                     artisan_id
                 FROM tbl_job_requests
                 WHERE job_request_id=%s
@@ -1062,7 +1062,7 @@ def updateJobRequestStatus(event, context):
                     })
                 }
 
-            if job_request["request_status"] != "pending":
+            if job_request["status"] != "pending":
                 return {
                     "statusCode": 400,
                     "body": json.dumps({
@@ -1078,7 +1078,7 @@ def updateJobRequestStatus(event, context):
                     UPDATE tbl_job_requests
                     SET
                         artisan_id=%s,
-                        request_status='accepted'
+                        status='accepted'
                     WHERE job_request_id=%s
                     """,
                     (
@@ -1105,7 +1105,6 @@ def updateJobRequestStatus(event, context):
                     )
                 )
 
-            # fetch customer email for notification
             cursor.execute(
                 """
                 SELECT email
@@ -1118,10 +1117,8 @@ def updateJobRequestStatus(event, context):
 
             customer = cursor.fetchone()
 
-        # commit DB first before sending email
         connection.commit()
 
-        # send email after commit so email failure doesn't affect DB
         if customer:
             try:
                 if status == "accepted":
@@ -1172,7 +1169,6 @@ def updateJobRequestStatus(event, context):
                 "error": str(e)
             })
         }
-
 
 def createBooking(event, context):
 
