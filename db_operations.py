@@ -133,7 +133,7 @@ class DBOperations:
     def insert_address(self, data):
         try:
             query = """
-                INSERT INTO tbl_address (
+                INSERT INTO tbl_addresses (
                     user_id, label, address,
                     city, state, latitude, longitude
                 ) VALUES (
