@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 
 import boto3
+from urllib3.util import connection
 
 import auxfunct
 from db_operations import db
@@ -860,3 +861,497 @@ def registerAdmin(event, context):
     except Exception as e:
         logger.exception("Internal Server Error")
         return construct_response(HTTP_INTERNAL_ERROR, {"error": f"Internal Server Error: {str(e)}"})
+
+def createJobRequest(event, context):
+
+    try:
+        claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
+        cognito_sub = claims["sub"]
+
+        body = event.get("body")
+
+        if isinstance(body, str):
+            body = json.loads(body)
+
+        required_fields = [
+            "serviceId",
+            "description",
+            "serviceAddress",
+            "preferredDate"
+        ]
+
+        missing_fields = [
+            field for field in required_fields
+            if not body.get(field)
+        ]
+
+        if missing_fields:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({
+                    "success": False,
+                    "message": f"Missing required fields: {', '.join(missing_fields)}"
+                })
+            }
+
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT user_id
+                FROM tbl_users
+                WHERE cognito_sub = %s
+                LIMIT 1
+                """,
+                (cognito_sub,)
+            )
+
+            customer = cursor.fetchone()
+
+            if not customer:
+                return {
+                    "statusCode": 404,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "Authenticated customer not found."
+                    })
+                }
+
+            customer_id = customer["user_id"]
+
+            cursor.execute(
+                """
+                INSERT INTO tbl_job_requests
+                (
+                    customer_id,
+                    service_id,
+                    description,
+                    service_address,
+                    preferred_date,
+                    request_status
+                )
+                VALUES
+                (%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    customer_id,
+                    body["serviceId"],
+                    body["description"],
+                    body["serviceAddress"],
+                    body["preferredDate"],
+                    "pending"
+                )
+            )
+
+            job_request_id = cursor.lastrowid
+
+        connection.commit()
+
+        return {
+            "statusCode": 201,
+            "body": json.dumps({
+                "success": True,
+                "jobRequestId": job_request_id,
+                "customerId": customer_id,
+                "status": "pending",
+                "message": "Job request created successfully."
+            })
+        }
+
+    except Exception as e:
+
+        connection.rollback()
+
+        return {
+            "statusCode": 500,
+            "body": json.dumps({
+                "success": False,
+                "message": "Internal server error.",
+                "error": str(e)
+            })
+        }
+
+def updateJobRequestStatus(event, context):
+
+    try:
+
+        claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
+        cognito_sub = claims["sub"]
+
+        job_request_id = event["pathParameters"]["jobRequestId"]
+
+        body = event.get("body")
+
+        if isinstance(body, str):
+            body = json.loads(body)
+
+        status = body.get("status")
+
+        if status not in ["accepted", "declined"]:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({
+                    "success": False,
+                    "message": "Status must be either 'accepted' or 'declined'."
+                })
+            }
+
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT user_id, role
+                FROM tbl_users
+                WHERE cognito_sub = %s
+                LIMIT 1
+                """,
+                (cognito_sub,)
+            )
+
+            artisan = cursor.fetchone()
+
+            if not artisan:
+                return {
+                    "statusCode": 404,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "Authenticated artisan not found."
+                    })
+                }
+
+            if artisan["role"] != "artisan":
+                return {
+                    "statusCode": 403,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "Only artisans can perform this action."
+                    })
+                }
+
+            artisan_id = artisan["user_id"]
+
+            cursor.execute(
+                """
+                SELECT
+                    job_request_id,
+                    customer_id,
+                    request_status,
+                    artisan_id
+                FROM tbl_job_requests
+                WHERE job_request_id=%s
+                LIMIT 1
+                """,
+                (job_request_id,)
+            )
+
+            job_request = cursor.fetchone()
+
+            if not job_request:
+                return {
+                    "statusCode": 404,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "Job request not found."
+                    })
+                }
+
+            if job_request["request_status"] != "pending":
+                return {
+                    "statusCode": 400,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "This job request has already been processed."
+                    })
+                }
+
+            if status == "accepted":
+
+                cursor.execute(
+                    """
+                    UPDATE tbl_job_requests
+                    SET
+                        artisan_id=%s,
+                        request_status='accepted'
+                    WHERE job_request_id=%s
+                    """,
+                    (
+                        artisan_id,
+                        job_request_id
+                    )
+                )
+
+            else:
+
+                cursor.execute(
+                    """
+                    INSERT IGNORE INTO tbl_job_request_declines
+                    (
+                        job_request_id,
+                        artisan_id
+                    )
+                    VALUES
+                    (%s,%s)
+                    """,
+                    (
+                        job_request_id,
+                        artisan_id
+                    )
+                )
+
+            # fetch customer email for notification
+            cursor.execute(
+                """
+                SELECT email
+                FROM tbl_users
+                WHERE user_id=%s
+                LIMIT 1
+                """,
+                (job_request["customer_id"],)
+            )
+
+            customer = cursor.fetchone()
+
+        # commit DB first before sending email
+        connection.commit()
+
+        # send email after commit so email failure doesn't affect DB
+        if customer:
+            try:
+                if status == "accepted":
+                    auxfunct.send_email(
+                        to_email=customer["email"],
+                        subject="Your job request has been accepted!",
+                        body=f"""
+                            <h2>Good news!</h2>
+                            <p>An artisan has accepted your job request <b>#{job_request_id}</b>.</p>
+                            <p>Log in to confirm your booking.</p>
+                        """
+                    )
+                else:
+                    auxfunct.send_email(
+                        to_email=customer["email"],
+                        subject="Update on your job request",
+                        body=f"""
+                            <h2>Job Request Update</h2>
+                            <p>An artisan has declined your job request <b>#{job_request_id}</b>.</p>
+                            <p>Your request is still open and other artisans can accept it.</p>
+                        """
+                    )
+            except Exception as email_error:
+                print(f"Email failed: {email_error}")  # log but don't fail the request
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "success": True,
+                "jobRequestId": int(job_request_id),
+                "status": status,
+                "message": f"Job request {status} successfully."
+            })
+        }
+
+    except Exception as e:
+
+        try:
+            connection.rollback()
+        except:
+            pass
+
+        return {
+            "statusCode": 500,
+            "body": json.dumps({
+                "success": False,
+                "message": "Internal server error.",
+                "error": str(e)
+            })
+        }
+
+def createBooking(event, context):
+
+    try:
+
+        claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
+        cognito_sub = claims["sub"]
+
+        body = event.get("body")
+
+        if isinstance(body, str):
+            body = json.loads(body)
+
+        required_fields = [
+            "jobRequestId",
+            "artisanId",
+            "bookingDate",
+            "serviceAddress",
+            "agreedAmount"
+        ]
+
+        missing_fields = [
+            field for field in required_fields
+            if not body.get(field)
+        ]
+
+        if missing_fields:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({
+                    "success": False,
+                    "message": f"Missing required fields: {', '.join(missing_fields)}"
+                })
+            }
+
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT user_id
+                FROM tbl_users
+                WHERE cognito_sub = %s
+                LIMIT 1
+                """,
+                (cognito_sub,)
+            )
+
+            customer = cursor.fetchone()
+
+            if not customer:
+                return {
+                    "statusCode": 404,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "Authenticated customer not found."
+                    })
+                }
+
+            customer_id = customer["user_id"]
+
+            cursor.execute(
+                """
+                SELECT
+                    job_request_id,
+                    customer_id,
+                    artisan_id,
+                    request_status
+                FROM tbl_job_requests
+                WHERE job_request_id = %s
+                LIMIT 1
+                """,
+                (body["jobRequestId"],)
+            )
+
+            job_request = cursor.fetchone()
+
+            if not job_request:
+                return {
+                    "statusCode": 404,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "Job request not found."
+                    })
+                }
+
+            if job_request["customer_id"] != customer_id:
+                return {
+                    "statusCode": 403,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "You are not authorized to book this job request."
+                    })
+                }
+
+            if job_request["request_status"] != "accepted":
+                return {
+                    "statusCode": 400,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "This job request has not been accepted by an artisan."
+                    })
+                }
+
+            if job_request["artisan_id"] != body["artisanId"]:
+                return {
+                    "statusCode": 400,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "The selected artisan did not accept this job request."
+                    })
+                }
+
+            cursor.execute(
+                """
+                SELECT booking_id
+                FROM tbl_bookings
+                WHERE job_request_id = %s
+                LIMIT 1
+                """,
+                (body["jobRequestId"],)
+            )
+
+            existing_booking = cursor.fetchone()
+
+            if existing_booking:
+                return {
+                    "statusCode": 409,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "A booking already exists for this job request."
+                    })
+                }
+
+            cursor.execute(
+                """
+                INSERT INTO tbl_bookings
+                (
+                    job_request_id,
+                    customer_id,
+                    artisan_id,
+                    booking_date,
+                    service_address,
+                    agreed_amount,
+                    booking_status,
+                    customer_notes,
+                    artisan_notes
+                )
+                VALUES
+                (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    body["jobRequestId"],
+                    customer_id,
+                    body["artisanId"],
+                    body["bookingDate"],
+                    body["serviceAddress"],
+                    body["agreedAmount"],
+                    "scheduled",
+                    body.get("customerNotes"),
+                    body.get("artisanNotes")
+                )
+            )
+
+            booking_id = cursor.lastrowid
+
+        connection.commit()
+
+        return {
+            "statusCode": 201,
+            "body": json.dumps({
+                "success": True,
+                "bookingId": booking_id,
+                "customerId": customer_id,
+                "bookingStatus": "scheduled",
+                "message": "Booking created successfully."
+            })
+        }
+
+    except Exception as e:
+
+        connection.rollback()
+
+        return {
+            "statusCode": 500,
+            "body": json.dumps({
+                "success": False,
+                "message": "Internal server error.",
+                "error": str(e)
+            })
+        }

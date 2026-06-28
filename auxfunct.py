@@ -1,4 +1,21 @@
 import re
+import boto3
+
+ses = boto3.client("ses", region_name="us-east-1")  # your AWS region
+
+def send_email(to_email, subject, body):
+    ses.send_email(
+        Source="noreply@yourdomain.com",  # must be verified in SES
+        Destination={
+            "ToAddresses": [to_email]
+        },
+        Message={
+            "Subject": {"Data": subject},
+            "Body": {
+                "Html": {"Data": body}
+            }
+        }
+    )
 
 def validate_password(password: str) -> bool:
     """

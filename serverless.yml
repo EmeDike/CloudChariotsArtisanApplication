@@ -55,6 +55,14 @@ functions:
           path: /registerAdmin
           method: post
 
+  createJobRequest:
+    handler: handler.createJobRequest
+    events:
+      - httpApi:
+          path: /createJobRequest
+          method: post
+
+
 plugins:
   - serverless-python-requirements
   - serverless-offline
