@@ -876,6 +876,7 @@ def createJobRequest(event, context):
 
         required_fields = [
             "serviceId",
+            "title",
             "description",
             "serviceAddress",
             "preferredDate"
@@ -926,17 +927,19 @@ def createJobRequest(event, context):
                 (
                     customer_id,
                     service_id,
+                    title,
                     description,
-                    service_address,
+                    location_address,
                     preferred_date,
-                    request_status
+                    status
                 )
                 VALUES
-                (%s,%s,%s,%s,%s,%s)
+                (%s,%s,%s,%s,%s,%s,%s)
                 """,
                 (
                     customer_id,
                     body["serviceId"],
+                    body["title"],
                     body["description"],
                     body["serviceAddress"],
                     body["preferredDate"],
