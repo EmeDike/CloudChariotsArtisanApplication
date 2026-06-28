@@ -7,6 +7,10 @@ provider:
   stage: ${opt:stage, self:custom.defaultEnv}
   timeout: 15
   memorySize: 128
+  environment:
+    COGNITO_USER_POOL_ID: eu-west-2_aAiz68RUa
+    COGNITO_CLIENT_ID: fsevtbl0am0q2gr5enlg0pbno
+
   iam:
     role:
       statements:
@@ -42,10 +46,6 @@ functions:
       - httpApi:
           path: /registerAdmin
           method: post
-
-
-
-
 
 plugins:
   - serverless-python-requirements
