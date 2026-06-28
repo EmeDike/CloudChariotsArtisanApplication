@@ -10,7 +10,6 @@ provider:
   environment:
     COGNITO_USER_POOL_ID: eu-west-2_aAiz68RUa
     COGNITO_CLIENT_ID: fsevtbl0am0q2gr5enlg0pbno
-
   iam:
     role:
       statements:
@@ -18,6 +17,15 @@ provider:
           Action:
             - ssm:GetParameters
           Resource: "arn:aws:ssm:eu-west-2:628479575487:parameter/DB_*"
+        - Effect: Allow
+          Action:
+            - cognito-idp:AdminCreateUser
+            - cognito-idp:AdminSetUserPassword
+            - cognito-idp:AdminGetUser
+            - cognito-idp:AdminAddUserToGroup
+            - cognito-idp:AdminInitiateAuth
+          Resource: "arn:aws:cognito-idp:eu-west-2:628479575487:userpool/eu-west-2_aAiz68RUa"
+
 functions:
   user_login:
     handler: handler.user_login
