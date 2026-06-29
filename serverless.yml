@@ -69,6 +69,13 @@ functions:
           path: /updateJobRequestStatus
           method: post
 
+  createBooking:
+    handler: handler.createBooking
+    events:
+      - httpApi:
+          path: /createBooking
+          method: post
+
 
 
 plugins:
