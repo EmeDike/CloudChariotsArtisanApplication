@@ -832,10 +832,7 @@ def registerAdmin(event, context):
             return construct_response(user_result["statusCode"], user_result["body"])
         user_id = user_result["body"].get("user_id")
 
-        # 7. Insert Admin profile into DB (tbl_admins)
-        # - cognito_sub stored here directly as per tbl_admins schema
-        # - department e.g. "Operations", "Finance", "Technical"
-        # - designation e.g. "Super Admin", "Support Agent", "Manager"
+
         admin_db_payload = {
             "user_id":     user_id,
             "cognito_sub": cognito_sub,
