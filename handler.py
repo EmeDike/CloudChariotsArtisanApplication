@@ -1448,3 +1448,220 @@ def getCustomerBookings(event, context):
                 "error": str(e)
             })
         }
+
+def createReview(event, context):
+
+    try:
+
+        claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
+        cognito_sub = claims["sub"]
+
+        body = event.get("body")
+
+        if isinstance(body, str):
+            body = json.loads(body)
+
+        required_fields = [
+            "bookingId",
+            "rating"
+        ]
+
+        missing_fields = [
+            field for field in required_fields
+            if not body.get(field)
+        ]
+
+        if missing_fields:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({
+                    "success": False,
+                    "message": f"Missing required fields: {', '.join(missing_fields)}"
+                })
+            }
+
+        rating = body.get("rating")
+
+        if not isinstance(rating, int) or rating < 1 or rating > 5:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({
+                    "success": False,
+                    "message": "Rating must be a number between 1 and 5."
+                })
+            }
+
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            # get customer
+            cursor.execute(
+                """
+                SELECT user_id
+                FROM tbl_users
+                WHERE cognito_sub = %s
+                LIMIT 1
+                """,
+                (cognito_sub,)
+            )
+
+            customer = cursor.fetchone()
+
+            if not customer:
+                return {
+                    "statusCode": 404,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "Customer not found."
+                    })
+                }
+
+            customer_id = customer["user_id"]
+
+            # get booking
+            cursor.execute(
+                """
+                SELECT
+                    b.booking_id,
+                    b.job_request_id,
+                    b.artisan_id,
+                    b.customer_id,
+                    b.booking_status
+                FROM tbl_bookings b
+                WHERE b.booking_id = %s
+                LIMIT 1
+                """,
+                (body["bookingId"],)
+            )
+
+            booking = cursor.fetchone()
+
+            if not booking:
+                return {
+                    "statusCode": 404,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "Booking not found."
+                    })
+                }
+
+            # only the customer who made the booking can review
+            if booking["customer_id"] != customer_id:
+                return {
+                    "statusCode": 403,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "You are not authorized to review this booking."
+                    })
+                }
+
+            # booking must be completed before reviewing
+            if booking["booking_status"] != "completed":
+                return {
+                    "statusCode": 400,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "You can only review a completed booking."
+                    })
+                }
+
+            # check if review already exists
+            cursor.execute(
+                """
+                SELECT review_id
+                FROM tbl_reviews
+                WHERE booking_id = %s
+                LIMIT 1
+                """,
+                (body["bookingId"],)
+            )
+
+            existing_review = cursor.fetchone()
+
+            if existing_review:
+                return {
+                    "statusCode": 409,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "You have already reviewed this booking."
+                    })
+                }
+
+            # insert review
+            cursor.execute(
+                """
+                INSERT INTO tbl_reviews
+                (
+                    booking_id,
+                    job_request_id,
+                    customer_id,
+                    artisan_id,
+                    rating,
+                    review_text
+                )
+                VALUES
+                (%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    body["bookingId"],
+                    booking["job_request_id"],
+                    customer_id,
+                    booking["artisan_id"],
+                    rating,
+                    body.get("reviewText")
+                )
+            )
+
+            review_id = cursor.lastrowid
+
+            # update artisan average rating
+            cursor.execute(
+                """
+                UPDATE tbl_artisans
+                SET
+                    average_rating = (
+                        SELECT AVG(rating)
+                        FROM tbl_reviews
+                        WHERE artisan_id = %s
+                    ),
+                    total_reviews = (
+                        SELECT COUNT(*)
+                        FROM tbl_reviews
+                        WHERE artisan_id = %s
+                    )
+                WHERE user_id = %s
+                """,
+                (
+                    booking["artisan_id"],
+                    booking["artisan_id"],
+                    booking["artisan_id"]
+                )
+            )
+
+        connection.commit()
+
+        return {
+            "statusCode": 201,
+            "body": json.dumps({
+                "success": True,
+                "reviewId": review_id,
+                "bookingId": body["bookingId"],
+                "rating": rating,
+                "message": "Review submitted successfully."
+            })
+        }
+
+    except Exception as e:
+
+        try:
+            connection.rollback()
+        except:
+            pass
+
+        return {
+            "statusCode": 500,
+            "body": json.dumps({
+                "success": False,
+                "message": "Internal server error.",
+                "error": str(e)
+            })
+        }

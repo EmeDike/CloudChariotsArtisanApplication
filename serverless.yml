@@ -83,7 +83,12 @@ functions:
           path: /getCustomerBookings
           method: get
 
-
+  createReview:
+    handler: handler.createReview
+    events:
+      - httpApi:
+          path: /createReview
+          method: post
 
 plugins:
   - serverless-python-requirements
