@@ -985,12 +985,21 @@ def updateJobRequestStatus(event, context):
         claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
         cognito_sub = claims["sub"]
 
-        job_request_id = event["pathParameters"]["jobRequestId"]
-
         body = event.get("body")
 
         if isinstance(body, str):
             body = json.loads(body)
+
+        job_request_id = body.get("jobRequestId")  # ← now from body
+
+        if not job_request_id:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({
+                    "success": False,
+                    "message": "jobRequestId is required."
+                })
+            }
 
         status = body.get("status")
 
@@ -1076,15 +1085,11 @@ def updateJobRequestStatus(event, context):
                 cursor.execute(
                     """
                     UPDATE tbl_job_requests
-                    SET
-                        artisan_id=%s,
+                    SET artisan_id=%s,
                         status='accepted'
                     WHERE job_request_id=%s
                     """,
-                    (
-                        artisan_id,
-                        job_request_id
-                    )
+                    (artisan_id, job_request_id)
                 )
 
             else:
@@ -1092,17 +1097,10 @@ def updateJobRequestStatus(event, context):
                 cursor.execute(
                     """
                     INSERT IGNORE INTO tbl_job_request_declines
-                    (
-                        job_request_id,
-                        artisan_id
-                    )
-                    VALUES
-                    (%s,%s)
+                    (job_request_id, artisan_id)
+                    VALUES (%s,%s)
                     """,
-                    (
-                        job_request_id,
-                        artisan_id
-                    )
+                    (job_request_id, artisan_id)
                 )
 
             cursor.execute(
