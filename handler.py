@@ -1233,7 +1233,7 @@ def createBooking(event, context):
                     job_request_id,
                     customer_id,
                     artisan_id,
-                    request_status
+                    status
                 FROM tbl_job_requests
                 WHERE job_request_id = %s
                 LIMIT 1
@@ -1261,7 +1261,7 @@ def createBooking(event, context):
                     })
                 }
 
-            if job_request["request_status"] != "accepted":
+            if job_request["status"] != "accepted":
                 return {
                     "statusCode": 400,
                     "body": json.dumps({
