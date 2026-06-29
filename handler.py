@@ -1360,3 +1360,91 @@ def createBooking(event, context):
                 "error": str(e)
             })
         }
+
+def getCustomerBookings(event, context):
+
+    try:
+
+        claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
+        cognito_sub = claims["sub"]
+
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            cursor.execute(
+                """
+                SELECT user_id
+                FROM tbl_users
+                WHERE cognito_sub = %s
+                LIMIT 1
+                """,
+                (cognito_sub,)
+            )
+
+            customer = cursor.fetchone()
+
+            if not customer:
+                return {
+                    "statusCode": 404,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "Authenticated customer not found."
+                    })
+                }
+
+            customer_id = customer["user_id"]
+
+            cursor.execute(
+                """
+                SELECT
+                    b.booking_id,
+                    b.job_request_id,
+                    b.artisan_id,
+                    b.booking_date,
+                    b.service_address,
+                    b.agreed_amount,
+                    b.booking_status,
+                    b.customer_notes,
+                    b.artisan_notes,
+                    b.created_at,
+                    jr.title AS job_title,
+                    jr.description AS job_description,
+                    u.first_name AS artisan_first_name,
+                    u.last_name AS artisan_last_name,
+                    u.phone_number AS artisan_phone
+                FROM tbl_bookings b
+                JOIN tbl_job_requests jr ON jr.job_request_id = b.job_request_id
+                JOIN tbl_users u ON u.user_id = b.artisan_id
+                WHERE b.customer_id = %s
+                ORDER BY b.created_at DESC
+                """,
+                (customer_id,)
+            )
+
+            bookings = cursor.fetchall()
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "success": True,
+                "customerId": customer_id,
+                "total": len(bookings),
+                "bookings": bookings,
+                "message": "Bookings retrieved successfully."
+            }, default=str)
+        }
+
+    except Exception as e:
+
+        try:
+            connection.rollback()
+        except:
+            pass
+
+        return {
+            "statusCode": 500,
+            "body": json.dumps({
+                "success": False,
+                "message": "Internal server error.",
+                "error": str(e)
+            })
+        }

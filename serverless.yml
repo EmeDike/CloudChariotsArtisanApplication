@@ -76,6 +76,13 @@ functions:
           path: /createBooking
           method: post
 
+  getCustomerBookings:
+    handler: handler.getCustomerBookings
+    events:
+      - httpApi:
+          path: /getCustomerBookings
+          method: get
+
 
 
 plugins:
