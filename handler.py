@@ -1662,3 +1662,207 @@ def createReview(event, context):
                 "error": str(e)
             })
         }
+
+def searchNearbyArtisans(event, context):
+
+    try:
+
+        claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
+        cognito_sub = claims["sub"]
+
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            cursor.execute(
+                """
+                SELECT
+                    user_id,
+                    role,
+                    is_active
+                FROM tbl_users
+                WHERE cognito_sub=%s
+                LIMIT 1
+                """,
+                (cognito_sub,)
+            )
+
+            user = cursor.fetchone()
+
+            if not user:
+                return construct_response(
+                    HTTP_NOT_FOUND,
+                    {
+                        "success": False,
+                        "message": "Authenticated user not found."
+                    }
+                )
+
+            if user["role"].lower() != "customer":
+                return construct_response(
+                    HTTP_FORBIDDEN,
+                    {
+                        "success": False,
+                        "message": "Only customers can search for artisans."
+                    }
+                )
+
+            if user["is_active"] != 1:
+                return construct_response(
+                    HTTP_FORBIDDEN,
+                    {
+                        "success": False,
+                        "message": "Your account is inactive."
+                    }
+                )
+
+        body = event.get("body")
+
+        if isinstance(body, str):
+            body = json.loads(body)
+
+        if body is None:
+            body = {}
+
+        required_fields = [
+            "latitude",
+            "longitude",
+            "serviceId"
+        ]
+
+        missing_fields = [
+            field
+            for field in required_fields
+            if body.get(field) is None
+        ]
+
+        if missing_fields:
+
+            return construct_response(
+                HTTP_BAD_REQUEST,
+                {
+                    "success": False,
+                    "message": f"Missing required fields: {', '.join(missing_fields)}"
+                }
+            )
+
+        latitude = float(body["latitude"])
+        longitude = float(body["longitude"])
+        service_id = int(body["serviceId"])
+
+        radius = float(body.get("radius", 10))
+        limit = int(body.get("limit", 20))
+
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            sql = """
+                SELECT
+
+                    a.artisan_id,
+                    a.business_name,
+                    a.years_of_experience,
+                    a.average_rating,
+                    a.total_reviews,
+
+                    u.first_name,
+                    u.last_name,
+                    u.phone_number,
+
+                    ad.address,
+                    ad.city,
+                    ad.state,
+                    ad.country,
+                    ad.latitude,
+                    ad.longitude,
+
+                    s.id AS service_id,
+                    s.name AS service_name,
+                    s.base_price,
+
+                    ats.custom_price,
+                    ats.estimated_duration,
+
+                    (
+                        ST_Distance_Sphere(
+                            POINT(ad.longitude, ad.latitude),
+                            POINT(%s,%s)
+                        ) / 1000
+                    ) AS distance
+
+                FROM tbl_artisans a
+
+                INNER JOIN tbl_users u
+                    ON u.user_id = a.user_id
+
+                INNER JOIN tbl_address ad
+                    ON ad.user_id = u.user_id
+
+                INNER JOIN tbl_artisan_services ats
+                    ON ats.artisan_id = a.artisan_id
+
+                INNER JOIN services s
+                    ON s.id = ats.service_id
+
+                WHERE
+
+                    ats.service_id = %s
+                    AND ats.is_active = 1
+                    AND a.is_available = 1
+                    AND a.verification_status = 'verified'
+
+                HAVING distance <= %s
+
+                ORDER BY
+
+                    distance ASC,
+                    a.average_rating DESC,
+                    a.total_reviews DESC
+
+                LIMIT %s
+            """
+
+            cursor.execute(
+                sql,
+                (
+                    longitude,
+                    latitude,
+                    service_id,
+                    radius,
+                    limit
+                )
+            )
+
+            artisans = cursor.fetchall()
+
+        return construct_response(
+            HTTP_OK,
+            {
+                "success": True,
+                "customer_id": user["user_id"],
+                "service_id": service_id,
+                "radius_km": radius,
+                "count": len(artisans),
+                "artisans": artisans
+            }
+        )
+
+    except ValueError:
+
+        return construct_response(
+            HTTP_BAD_REQUEST,
+            {
+                "success": False,
+                "message": "Latitude, longitude, radius, limit and serviceId must be numeric."
+            }
+        )
+
+    except Exception as e:
+
+        logger.exception("searchNearbyArtisans failed")
+
+        return construct_response(
+            HTTP_INTERNAL_ERROR,
+            {
+                "success": False,
+                "message": "Internal server error.",
+                "error": str(e)
+            }
+        )

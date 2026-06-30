@@ -90,6 +90,13 @@ functions:
           path: /createReview
           method: post
 
+  searchNearbyArtisans:
+    handler: handler.searchNearbyArtisans
+    events:
+      - httpApi:
+          path: /searchNearbyArtisans
+          method: get
+
 plugins:
   - serverless-python-requirements
   - serverless-offline
