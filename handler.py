@@ -1662,7 +1662,6 @@ def createReview(event, context):
                 "error": str(e)
             })
         }
-
 def searchNearbyArtisans(event, context):
 
     try:
@@ -1679,7 +1678,7 @@ def searchNearbyArtisans(event, context):
                     role,
                     is_active
                 FROM tbl_users
-                WHERE cognito_sub=%s
+                WHERE cognito_sub = %s
                 LIMIT 1
                 """,
                 (cognito_sub,)
@@ -1735,7 +1734,6 @@ def searchNearbyArtisans(event, context):
         ]
 
         if missing_fields:
-
             return construct_response(
                 HTTP_BAD_REQUEST,
                 {
@@ -1766,10 +1764,10 @@ def searchNearbyArtisans(event, context):
                     u.last_name,
                     u.phone_number,
 
+                    ad.label,
                     ad.address,
                     ad.city,
                     ad.state,
-                    ad.country,
                     ad.latitude,
                     ad.longitude,
 
@@ -1783,7 +1781,7 @@ def searchNearbyArtisans(event, context):
                     (
                         ST_Distance_Sphere(
                             POINT(ad.longitude, ad.latitude),
-                            POINT(%s,%s)
+                            POINT(%s, %s)
                         ) / 1000
                     ) AS distance
 
@@ -1792,7 +1790,7 @@ def searchNearbyArtisans(event, context):
                 INNER JOIN tbl_users u
                     ON u.user_id = a.user_id
 
-                INNER JOIN tbl_address ad
+                INNER JOIN tbl_addresses ad
                     ON ad.user_id = u.user_id
 
                 INNER JOIN tbl_artisan_services ats
@@ -1802,7 +1800,6 @@ def searchNearbyArtisans(event, context):
                     ON s.id = ats.service_id
 
                 WHERE
-
                     ats.service_id = %s
                     AND ats.is_active = 1
                     AND a.is_available = 1
@@ -1811,7 +1808,6 @@ def searchNearbyArtisans(event, context):
                 HAVING distance <= %s
 
                 ORDER BY
-
                     distance ASC,
                     a.average_rating DESC,
                     a.total_reviews DESC
