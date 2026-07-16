@@ -330,7 +330,41 @@ class DBOperations:
                 "body": {"error": f"Failed to insert wallet: {str(e)}"}
             }
 
+    def insert_otp(self, data):
+        try:
+            query = """
+                INSERT INTO tbl_otp (phone_number, otp_code, created_at, expires_at, is_used)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+            values = (data["phone_number"], data["otp_code"], data["created_at"], data["expires_at"], data["is_used"])
+            cursor = connection.cursor()
+            cursor.execute(query, values)
+            connection.commit()
+            return {"statusCode": 200, "body": {"message": "OTP stored."}}
+        except Exception as e:
+            return {"statusCode": 500, "body": {"error": str(e)}}
 
+    def verify_otp(self, phone_number, otp_code):
+        try:
+            query = """
+                SELECT * FROM tbl_otp
+                WHERE phone_number = %s AND otp_code = %s AND is_used = 0 AND expires_at > NOW()
+                ORDER BY created_at DESC LIMIT 1
+            """
+            cursor = connection.cursor()
+            cursor.execute(query, (phone_number, otp_code))
+            result = cursor.fetchone()
+
+            if not result:
+                return {"statusCode": 400, "body": {"error": "Invalid or expired OTP."}}
+
+            update_query = "UPDATE tbl_otp SET is_used = 1 WHERE phone_number = %s AND otp_code = %s"
+            cursor.execute(update_query, (phone_number, otp_code))
+            connection.commit()
+
+            return {"statusCode": 200, "body": {"message": "OTP verified."}}
+        except Exception as e:
+            return {"statusCode": 500, "body": {"error": str(e)}}
 # ----------------------------------------------------------------
 # Bootstrap DB connection from SSM Parameter Store
 # ----------------------------------------------------------------

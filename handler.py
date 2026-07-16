@@ -25,12 +25,114 @@ HTTP_UNAUTHORIZED = 401
 HTTP_NOT_FOUND = 404
 HTTP_TOO_MANY = 429
 HTTP_INTERNAL_ERROR = 500
+from botocore.exceptions import ClientError
+client = boto3.client("cognito-idp", region_name=COGNITO_REGION)
+
 
 ALLOWED_ROLES = [
     "admin",
     "artisan",
     "customer"
 ]
+
+def user_login(event, context):
+    """
+    POST /user_login
+    Frontend sends: { "email": "...", "password": "..." }
+    Screen: login.tsx
+    """
+    body = json.loads(event.get("body", "{}"))
+    email = body.get("email", "").strip().lower()
+    user_pass = body.get("password", "")
+
+    if not email or not user_pass:
+        return {
+            "statusCode": 400,
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+            "body": json.dumps({"success": False, "error": "Email and password are required"})
+        }
+
+    try:
+        # Authenticate with Cognito
+        auth_response = client.initiate_auth(
+            ClientId=COGNITO_CLIENT_ID,
+            AuthFlow="USER_PASSWORD_AUTH",
+            AuthParameters={
+                "USERNAME": email,
+                "PASSWORD": user_pass
+            }
+        )
+        tokens = auth_response["AuthenticationResult"]
+
+        # Get user profile from DB (shared connection — no close)
+        cursor = connection.cursor()
+        cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+        user = cursor.fetchone()
+
+        if not user:
+            return {
+                "statusCode": 404,
+                "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+                "body": json.dumps({"success": False, "error": "User not found in database"})
+            }
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+            "body": json.dumps({
+                "success": True,
+                "data": {
+                    "token": tokens["IdToken"],
+                    "access_token": tokens["AccessToken"],
+                    "refresh_token": tokens["RefreshToken"],
+                    "user": {
+                        "id": user["id"],
+                        "email": user["email"],
+                        "full_name": user["full_name"],
+                        "role": user["role"],
+                        "phone": user.get("phone"),
+                        "profile_image": user.get("profile_image"),
+                        "is_verified": True
+                    }
+                }
+            }, default=str)
+        }
+
+    except ClientError as e:
+        error_code = e.response["Error"]["Code"]
+
+        if error_code == "NotAuthorizedException":
+            return {
+                "statusCode": 401,
+                "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+                "body": json.dumps({"success": False, "error": "Invalid email or password"})
+            }
+        elif error_code == "UserNotFoundException":
+            return {
+                "statusCode": 401,
+                "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+                "body": json.dumps({"success": False, "error": "Invalid email or password"})
+            }
+        elif error_code == "UserNotConfirmedException":
+            return {
+                "statusCode": 403,
+                "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+                "body": json.dumps({"success": False, "error": "Please verify your email first"})
+            }
+        else:
+            return {
+                "statusCode": 500,
+                "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+                "body": json.dumps({"success": False, "error": e.response["Error"]["Message"]})
+            }
+
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+            "body": json.dumps({"success": False, "error": str(e)})
+        }
+
 
 
 def construct_response(status_code, body):
@@ -361,161 +463,7 @@ def reset_password(event, context):
                 "error": "Internal server error."
             }
         )
-def user_login(event, context):
-    cognito_client = boto3.client(
-        "cognito-idp",
-        region_name=COGNITO_REGION
-    )
 
-    try:
-        body = event.get("body", "{}")
-        if isinstance(body, str):
-            body = json.loads(body)
-
-        email = (body.get("email") or "").strip().lower()
-        password = body.get("password") or ""
-        expected_role = (body.get("role") or "").strip().lower()
-
-        if not email:
-            return construct_response(
-                HTTP_BAD_REQUEST,
-                {"message": "Email is required."}
-            )
-
-        if not password:
-            return construct_response(
-                HTTP_BAD_REQUEST,
-                {"message": "Password is required."}
-            )
-
-        if expected_role not in ["customer", "artisan", "courier", "admin"]:
-            return construct_response(
-                HTTP_BAD_REQUEST,
-                {"message": "A valid role is required."}
-            )
-
-        response = cognito_client.initiate_auth(
-            ClientId=COGNITO_CLIENT_ID,
-            AuthFlow="USER_PASSWORD_AUTH",
-            AuthParameters={
-                "USERNAME": email,
-                "PASSWORD": password
-            }
-        )
-
-        logger.info("User %s authenticated successfully.", email)
-
-        if "ChallengeName" in response:
-            return construct_response(
-                HTTP_OK,
-                {
-                    "message": "Additional authentication step required.",
-                    "challenge_name": response["ChallengeName"],
-                    "session": response.get("Session")
-                }
-            )
-
-        cognito_sub = get_cognito_sub(email)
-
-        if not cognito_sub:
-            return construct_response(
-                HTTP_INTERNAL_ERROR,
-                {"message": "Unable to retrieve user information."}
-            )
-
-        user_result = db.get_user_by_cognito_sub(cognito_sub)
-
-        if user_result["statusCode"] != HTTP_OK:
-            return construct_response(
-                HTTP_NOT_FOUND,
-                {"message": "User record not found."}
-            )
-
-        user = user_result["body"]
-
-        if user["role"].lower() != expected_role:
-            logger.warning(
-                "Access denied for %s. Expected role=%s, actual role=%s",
-                email,
-                expected_role,
-                user["role"]
-            )
-
-            return construct_response(
-                HTTP_FORBIDDEN,
-                {
-                    "message": "Access denied.",
-                    "expected_role": expected_role,
-                    "actual_role": user["role"]
-                }
-            )
-
-        if not user["is_active"]:
-            return construct_response(
-                HTTP_FORBIDDEN,
-                {"message": "Your account has been deactivated."}
-            )
-
-        authentication = response["AuthenticationResult"]
-
-        return construct_response(
-            HTTP_OK,
-            {
-                "message": "Login successful.",
-                "user": {
-                    "user_id": user["user_id"],
-                    "email": user["email"],
-                    "role": user["role"],
-                    "cognito_sub": user["cognito_sub"]
-                },
-                "access_token": authentication["AccessToken"],
-                "id_token": authentication["IdToken"],
-                "refresh_token": authentication.get("RefreshToken"),
-                "expires_in": authentication["ExpiresIn"],
-                "token_type": authentication["TokenType"]
-            }
-        )
-
-    except json.JSONDecodeError:
-        return construct_response(
-            HTTP_BAD_REQUEST,
-            {"message": "Invalid JSON body."}
-        )
-
-    except cognito_client.exceptions.NotAuthorizedException:
-        return construct_response(
-            401,
-            {"message": "Invalid email or password."}
-        )
-
-    except cognito_client.exceptions.UserNotFoundException:
-        return construct_response(
-            HTTP_NOT_FOUND,
-            {"message": "User not found."}
-        )
-
-    except cognito_client.exceptions.UserNotConfirmedException:
-        return construct_response(
-            HTTP_FORBIDDEN,
-            {"message": "Account has not been confirmed."}
-        )
-
-    except cognito_client.exceptions.PasswordResetRequiredException:
-        return construct_response(
-            HTTP_FORBIDDEN,
-            {"message": "Password reset is required."}
-        )
-
-    except Exception as e:
-        logger.exception("Login failed for %s", email if "email" in locals() else "unknown")
-
-        return construct_response(
-            HTTP_INTERNAL_ERROR,
-            {
-                "message": "Internal server error.",
-                "error": str(e)
-            }
-        )
 
 def registerArtisan(event, context):
     try:
@@ -1862,3 +1810,118 @@ def searchNearbyArtisans(event, context):
                 "error": str(e)
             }
         )
+
+def updateArtisanAvailability(event, context):
+    """
+    POST /updateArtisanAvailability
+
+    Body:
+    {
+        "artisan_id": 1,
+        "slots": [
+            {
+                "day_of_week": "monday",
+                "start_time": "09:00",
+                "end_time": "17:00",
+                "is_available": true
+            },
+            {
+                "day_of_week": "tuesday",
+                "start_time": "10:00",
+                "end_time": "16:00",
+                "is_available": true
+            }
+        ]
+    }
+
+    Replaces all existing availability for the artisan with the new slots.
+    """
+    try:
+        body = parse_body(event)
+        artisan_id = body.get("artisan_id")
+        slots = body.get("slots", [])
+
+        if not artisan_id:
+            return construct_response(HTTP_BAD_REQUEST, {
+                "error": "artisan_id is required"
+            })
+
+        if not slots or not isinstance(slots, list):
+            return construct_response(HTTP_BAD_REQUEST, {
+                "error": "slots must be a non-empty array"
+            })
+
+        valid_days = ['monday', 'tuesday', 'wednesday', 'thursday',
+                      'friday', 'saturday', 'sunday']
+
+        # Validate each slot
+        for slot in slots:
+            day = slot.get("day_of_week", "").lower()
+            if day not in valid_days:
+                return construct_response(HTTP_BAD_REQUEST, {
+                    "error": f"Invalid day_of_week: '{slot.get('day_of_week')}'. "
+                             f"Must be one of: {', '.join(valid_days)}"
+                })
+            if not slot.get("start_time") or not slot.get("end_time"):
+                return construct_response(HTTP_BAD_REQUEST, {
+                    "error": "Each slot must have start_time and end_time (HH:MM format)"
+                })
+
+        cursor = connection.cursor()
+
+        try:
+            # Delete existing availability for this artisan
+            delete_query = "DELETE FROM tbl_artisan_availability WHERE artisan_id = %s"
+            cursor.execute(delete_query, (artisan_id,))
+
+            # Insert new slots
+            insert_query = """
+                INSERT INTO tbl_artisan_availability (
+                    artisan_id, day_of_week, start_time,
+                    end_time, is_available, created_at, updated_at
+                ) VALUES (
+                    %s, %s, %s,
+                    %s, %s, %s, %s
+                )
+            """
+
+            now = datetime.now()
+            inserted_count = 0
+
+            for slot in slots:
+                params = (
+                    artisan_id,
+                    slot["day_of_week"].lower(),
+                    slot["start_time"],
+                    slot["end_time"],
+                    slot.get("is_available", True),
+                    now,
+                    now
+                )
+                cursor.execute(insert_query, params)
+                inserted_count += 1
+
+            connection.commit()
+            cursor.close()
+
+            return construct_response(HTTP_OK, {
+                "message": "Availability updated successfully",
+                "artisan_id": artisan_id,
+                "slots_saved": inserted_count
+            })
+
+        except Exception as e:
+            connection.rollback()
+            cursor.close()
+            raise e
+
+    except ValueError as ve:
+        return construct_response(HTTP_BAD_REQUEST, {
+            "error": str(ve)
+        })
+    except Exception as e:
+        logger.error(f"Error updating artisan availability: {str(e)}")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "error": "Failed to update artisan availability",
+            "details": str(e)
+        })

@@ -97,6 +97,20 @@ functions:
           path: /searchNearbyArtisans
           method: get
 
+  sendOtp:
+    handler: handler.sendOtp
+    events:
+      - httpApi:
+          path: /sendOtp
+          method: post
+
+  verifyOtp:
+    handler: handler.verifyOtp
+    events:
+      - httpApi:
+          path: /verifyOtp
+          method: post
+
 plugins:
   - serverless-python-requirements
   - serverless-offline
