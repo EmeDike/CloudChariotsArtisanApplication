@@ -53,7 +53,6 @@ def user_login(event, context):
         }
 
     try:
-        # Authenticate with Cognito
         auth_response = client.initiate_auth(
             ClientId=COGNITO_CLIENT_ID,
             AuthFlow="USER_PASSWORD_AUTH",
