@@ -113,7 +113,6 @@ functions:
 
 plugins:
   - serverless-python-requirements
-  - serverless-offline
 
 custom:
   defaultEnv: qa

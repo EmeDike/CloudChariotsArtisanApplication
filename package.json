@@ -13,8 +13,5 @@
     "serverless": "^3.38.0",
     "serverless-offline": "^13.2.0",
     "serverless-python-requirements": "^6.0.0"
-  },
-  "dependencies": {
-    "serverless-prune-plugin": "^2.1.0"
   }
 }
