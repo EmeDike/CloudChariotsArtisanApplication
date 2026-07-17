@@ -127,45 +127,80 @@ def user_login(event, context):
             "body": json.dumps({"success": False, "error": str(e)})
         }
 
-def getArtisanAvailability(event, context):
-    params = event.get("queryStringParameters") or {}
-    artisan_id = params.get("artisan_id")
-
-    if not artisan_id:
-        return {
-            "statusCode": 400,
-            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
-            "body": json.dumps({"success": False, "error": "artisan_id is required"})
-        }
+def getArtiAvail(event, context):
 
     try:
-        cursor = connection.cursor(pymysql.cursors.DictCursor)
+        claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
+        cognito_sub = claims["sub"]
 
-        cursor.execute(
-            """SELECT schedule_id, day_of_week, start_time, end_time, is_available
-            FROM tbl_artisan_availability
-            WHERE artisan_id = %s
-            ORDER BY FIELD(day_of_week, 'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday')""",
-            (artisan_id,)
-        )
-        availability = cursor.fetchall()
+        params = event.get("queryStringParameters") or {}
+        artisan_id = params.get("artisan_id")
 
-        cursor.execute(
-            """SELECT id, blocked_date, reason
-            FROM tbl_artisan_blocked_dates
-            WHERE artisan_id = %s AND blocked_date >= CURDATE()
-            ORDER BY blocked_date ASC""",
-            (artisan_id,)
-        )
-        blocked_dates = cursor.fetchall()
-        cursor.close()
+        if not artisan_id:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({
+                    "success": False,
+                    "message": "artisan_id is required."
+                })
+            }
+
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            # Verify the requesting user exists
+            cursor.execute(
+                """
+                SELECT user_id
+                FROM tbl_users
+                WHERE cognito_sub = %s
+                LIMIT 1
+                """,
+                (cognito_sub,)
+            )
+
+            requesting_user = cursor.fetchone()
+
+            if not requesting_user:
+                return {
+                    "statusCode": 404,
+                    "body": json.dumps({
+                        "success": False,
+                        "message": "Authenticated user not found."
+                    })
+                }
+
+            # Get weekly availability
+            cursor.execute(
+                """
+                SELECT schedule_id, day_of_week, start_time, end_time, is_available
+                FROM tbl_artisan_availability
+                WHERE artisan_id = %s
+                ORDER BY FIELD(day_of_week, 'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday')
+                """,
+                (artisan_id,)
+            )
+
+            availability = cursor.fetchall()
+
+            # Get blocked dates
+            cursor.execute(
+                """
+                SELECT id, blocked_date, reason
+                FROM tbl_artisan_blocked_dates
+                WHERE artisan_id = %s AND blocked_date >= CURDATE()
+                ORDER BY blocked_date ASC
+                """,
+                (artisan_id,)
+            )
+
+            blocked_dates = cursor.fetchall()
 
         return {
             "statusCode": 200,
-            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
             "body": json.dumps({
                 "success": True,
                 "data": {
+                    "artisan_id": int(artisan_id),
                     "availability": availability,
                     "blocked_dates": blocked_dates
                 }
@@ -173,10 +208,14 @@ def getArtisanAvailability(event, context):
         }
 
     except Exception as e:
+
         return {
             "statusCode": 500,
-            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
-            "body": json.dumps({"success": False, "error": str(e)})
+            "body": json.dumps({
+                "success": False,
+                "message": "Internal server error.",
+                "error": str(e)
+            })
         }
 
 def construct_response(status_code, body):

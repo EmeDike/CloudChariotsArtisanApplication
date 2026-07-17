@@ -41,11 +41,11 @@ functions:
           path: /registerArtisan
           method: post
 
-  getArtisanAvailability:
-    handler: handler.getArtisanAvail
+  getArtiAvail:
+    handler: handler.getArtiAvail
     events:
       - httpApi:
-          path: /getArtisanAvailability
+          path: /getArtiAvail
           method: get
 
 
