@@ -58,9 +58,10 @@ def user_login(event, context):
         )
         tokens = auth_response["AuthenticationResult"]
 
-        cursor = connection.cursor()
-        cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+        cursor = connection.cursor(pymysql.cursors.DictCursor)
+        cursor.execute("SELECT * FROM tbl_users WHERE email = %s", (email,))
         user = cursor.fetchone()
+        cursor.close()
 
         if not user:
             return {
@@ -125,7 +126,6 @@ def user_login(event, context):
             "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
             "body": json.dumps({"success": False, "error": str(e)})
         }
-
 
 def construct_response(status_code, body):
     return {
