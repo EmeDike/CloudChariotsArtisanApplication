@@ -104,7 +104,7 @@ functions:
     events:
       - httpApi:
           path: /searchNearbyArtisans
-          method: get
+          method: post
 
   sendOtp:
     handler: handler.sendOtp
