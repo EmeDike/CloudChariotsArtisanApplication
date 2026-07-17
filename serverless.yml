@@ -2,7 +2,7 @@ service: "Artisan-application-python-http-api"
 frameworkVersion: '3'
 provider:
   name: aws
-  runtime: python3.9
+  runtime: python3.11
   region: ${self:custom.${self:provider.stage}.region}
   stage: ${opt:stage, self:custom.defaultEnv}
   timeout: 15

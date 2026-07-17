@@ -41,12 +41,10 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
       - name: Install Node Dependencies
         run: |
-          npm install serverless -g
+          npm install serverless@3 -g
           npm install
-      - name: Serverless with Python Requirements
-        uses: dhollerbach/actions.serverless-with-python-requirements@master
+      - name: Deploy
+        run: npx serverless deploy --stage qa
         env:
-          SERVERLESS_ACCESS_KEY: ${{ secrets.CLOUDCHARIOTS }}
           AWS_ACCESS_KEY_ID: ${{ secrets.ACCESSKEY1 }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.SECRETKEY1 }}
-          STAGE: qa
