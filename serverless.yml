@@ -10,6 +10,14 @@ provider:
   environment:
     COGNITO_USER_POOL_ID: eu-west-2_aAiz68RUa
     COGNITO_CLIENT_ID: fsevtbl0am0q2gr5enlg0pbno
+  httpApi:
+    authorizers:
+      cognitoAuthorizer:
+        type: jwt
+        identitySource: $request.header.Authorization
+        issuerUrl: https://cognito-idp.eu-west-2.amazonaws.com/eu-west-2_aAiz68RUa
+        audience:
+          - fsevtbl0am0q2gr5enlg0pbno
   iam:
     role:
       statements:
@@ -27,6 +35,7 @@ provider:
           Resource: "arn:aws:cognito-idp:eu-west-2:628479575487:userpool/eu-west-2_aAiz68RUa"
 
 functions:
+  # === PUBLIC (no authorizer) ===
   user_login:
     handler: handler.user_login
     events:
@@ -40,15 +49,6 @@ functions:
       - httpApi:
           path: /registerArtisan
           method: post
-
-  getArtiAvail:
-    handler: handler.getArtiAvail
-    events:
-      - httpApi:
-          path: /getArtiAvail
-          method: get
-
-
 
   registerCustomer:
     handler: handler.registerCustomer
@@ -64,48 +64,6 @@ functions:
           path: /registerAdmin
           method: post
 
-  createJobRequest:
-    handler: handler.createJobRequest
-    events:
-      - httpApi:
-          path: /createJobRequest
-          method: post
-
-  updateJobRequestStatus:
-    handler: handler.updateJobRequestStatus
-    events:
-      - httpApi:
-          path: /updateJobRequestStatus
-          method: post
-
-  createBooking:
-    handler: handler.createBooking
-    events:
-      - httpApi:
-          path: /createBooking
-          method: post
-
-  getCustomerBookings:
-    handler: handler.getCustomerBookings
-    events:
-      - httpApi:
-          path: /getCustomerBookings
-          method: get
-
-  createReview:
-    handler: handler.createReview
-    events:
-      - httpApi:
-          path: /createReview
-          method: post
-
-  searchNearbyArtisans:
-    handler: handler.searchNearbyArtisans
-    events:
-      - httpApi:
-          path: /searchNearbyArtisans
-          method: post
-
   sendOtp:
     handler: handler.sendOtp
     events:
@@ -119,6 +77,70 @@ functions:
       - httpApi:
           path: /verifyOtp
           method: post
+
+  # === PROTECTED (with authorizer) ===
+  getArtiAvail:
+    handler: handler.getArtiAvail
+    events:
+      - httpApi:
+          path: /getArtiAvail
+          method: get
+          authorizer:
+            name: cognitoAuthorizer
+
+  searchNearbyArtisans:
+    handler: handler.searchNearbyArtisans
+    events:
+      - httpApi:
+          path: /searchNearbyArtisans
+          method: post
+          authorizer:
+            name: cognitoAuthorizer
+
+  createJobRequest:
+    handler: handler.createJobRequest
+    events:
+      - httpApi:
+          path: /createJobRequest
+          method: post
+          authorizer:
+            name: cognitoAuthorizer
+
+  updateJobRequestStatus:
+    handler: handler.updateJobRequestStatus
+    events:
+      - httpApi:
+          path: /updateJobRequestStatus
+          method: post
+          authorizer:
+            name: cognitoAuthorizer
+
+  createBooking:
+    handler: handler.createBooking
+    events:
+      - httpApi:
+          path: /createBooking
+          method: post
+          authorizer:
+            name: cognitoAuthorizer
+
+  getCustomerBookings:
+    handler: handler.getCustomerBookings
+    events:
+      - httpApi:
+          path: /getCustomerBookings
+          method: get
+          authorizer:
+            name: cognitoAuthorizer
+
+  createReview:
+    handler: handler.createReview
+    events:
+      - httpApi:
+          path: /createReview
+          method: post
+          authorizer:
+            name: cognitoAuthorizer
 
 plugins:
   - serverless-python-requirements

@@ -147,7 +147,6 @@ def getArtiAvail(event, context):
 
         with connection.cursor(pymysql.cursors.DictCursor) as cursor:
 
-            # Verify the requesting user exists
             cursor.execute(
                 """
                 SELECT user_id
