@@ -36,11 +36,6 @@ ALLOWED_ROLES = [
 ]
 
 def user_login(event, context):
-    """
-    POST /user_login
-    Frontend sends: { "email": "...", "password": "..." }
-    Screen: login.tsx
-    """
     body = json.loads(event.get("body", "{}"))
     email = body.get("email", "").strip().lower()
     user_pass = body.get("password", "")
@@ -63,7 +58,6 @@ def user_login(event, context):
         )
         tokens = auth_response["AuthenticationResult"]
 
-        # Get user profile from DB (shared connection — no close)
         cursor = connection.cursor()
         cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
         user = cursor.fetchone()
@@ -85,13 +79,13 @@ def user_login(event, context):
                     "access_token": tokens["AccessToken"],
                     "refresh_token": tokens["RefreshToken"],
                     "user": {
-                        "id": user["id"],
+                        "id": user["user_id"],
                         "email": user["email"],
-                        "full_name": user["full_name"],
+                        "full_name": f"{user['first_name']} {user['last_name']}",
                         "role": user["role"],
-                        "phone": user.get("phone"),
-                        "profile_image": user.get("profile_image"),
-                        "is_verified": True
+                        "phone": user.get("phone_number"),
+                        "profile_image": None,
+                        "is_verified": bool(user.get("is_active", False))
                     }
                 }
             }, default=str)
@@ -131,7 +125,6 @@ def user_login(event, context):
             "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
             "body": json.dumps({"success": False, "error": str(e)})
         }
-
 
 
 def construct_response(status_code, body):
