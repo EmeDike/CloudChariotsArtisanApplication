@@ -114,11 +114,8 @@ functions:
 plugins:
   - serverless-python-requirements
   - serverless-offline
-  - serverless-prune-plugin
+
 custom:
-  prune:
-    automatic: true
-    number: 3
   defaultEnv: qa
   hub:
     region: eu-west-2
