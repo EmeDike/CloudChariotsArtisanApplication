@@ -41,6 +41,15 @@ functions:
           path: /registerArtisan
           method: post
 
+  getArtisanAvailability:
+    handler: handler.getArtisanAvail
+    events:
+      - httpApi:
+          path: /getArtisanAvailability
+          method: get
+
+
+
   registerCustomer:
     handler: handler.registerCustomer
     events:

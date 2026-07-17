@@ -127,6 +127,58 @@ def user_login(event, context):
             "body": json.dumps({"success": False, "error": str(e)})
         }
 
+def getArtisanAvailability(event, context):
+    params = event.get("queryStringParameters") or {}
+    artisan_id = params.get("artisan_id")
+
+    if not artisan_id:
+        return {
+            "statusCode": 400,
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+            "body": json.dumps({"success": False, "error": "artisan_id is required"})
+        }
+
+    try:
+        cursor = connection.cursor(pymysql.cursors.DictCursor)
+
+        cursor.execute(
+            """SELECT schedule_id, day_of_week, start_time, end_time, is_available
+            FROM tbl_artisan_availability
+            WHERE artisan_id = %s
+            ORDER BY FIELD(day_of_week, 'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday')""",
+            (artisan_id,)
+        )
+        availability = cursor.fetchall()
+
+        cursor.execute(
+            """SELECT id, blocked_date, reason
+            FROM tbl_artisan_blocked_dates
+            WHERE artisan_id = %s AND blocked_date >= CURDATE()
+            ORDER BY blocked_date ASC""",
+            (artisan_id,)
+        )
+        blocked_dates = cursor.fetchall()
+        cursor.close()
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+            "body": json.dumps({
+                "success": True,
+                "data": {
+                    "availability": availability,
+                    "blocked_dates": blocked_dates
+                }
+            }, default=str)
+        }
+
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+            "body": json.dumps({"success": False, "error": str(e)})
+        }
+
 def construct_response(status_code, body):
     return {
         "statusCode": status_code,
