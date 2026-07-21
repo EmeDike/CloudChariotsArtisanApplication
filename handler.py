@@ -1692,206 +1692,204 @@ def createReview(event, context):
                 "error": str(e)
             })
         }
+
 def searchNearbyArtisans(event, context):
+    """
+    Search for verified, available artisans near a customer's location
+    who offer a specific service.
+
+    Request body (POST):
+        - latitude (float): Customer's latitude (required)
+        - longitude (float): Customer's longitude (required)
+        - serviceId (int): The service to search for (required)
+        - radius (float): Search radius in km (optional, default: 10)
+        - limit (int): Max results (optional, default: 20)
+        - sortBy (str): "nearest" | "top_rated" | "most_experienced" (optional, default: "nearest")
+    """
 
     try:
-
+        # --- Auth: extract user from Cognito JWT ---
         claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
         cognito_sub = claims["sub"]
 
-        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+        connection.ping(reconnect=True)
 
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT
-                    user_id,
-                    role,
-                    is_active
+                SELECT user_id, role, is_active
                 FROM tbl_users
                 WHERE cognito_sub = %s
                 LIMIT 1
                 """,
                 (cognito_sub,)
             )
-
             user = cursor.fetchone()
 
             if not user:
-                return construct_response(
-                    HTTP_NOT_FOUND,
-                    {
-                        "success": False,
-                        "message": "Authenticated user not found."
-                    }
-                )
+                return construct_response(HTTP_NOT_FOUND, {
+                    "success": False,
+                    "message": "Authenticated user not found."
+                })
 
             if user["role"].lower() != "customer":
-                return construct_response(
-                    HTTP_FORBIDDEN,
-                    {
-                        "success": False,
-                        "message": "Only customers can search for artisans."
-                    }
-                )
+                return construct_response(HTTP_FORBIDDEN, {
+                    "success": False,
+                    "message": "Only customers can search for artisans."
+                })
 
             if user["is_active"] != 1:
-                return construct_response(
-                    HTTP_FORBIDDEN,
-                    {
-                        "success": False,
-                        "message": "Your account is inactive."
-                    }
-                )
+                return construct_response(HTTP_FORBIDDEN, {
+                    "success": False,
+                    "message": "Your account is inactive."
+                })
 
+        # --- Parse & validate request body ---
         body = event.get("body")
-
         if isinstance(body, str):
             body = json.loads(body)
-
         if body is None:
             body = {}
 
-        required_fields = [
-            "latitude",
-            "longitude",
-            "serviceId"
-        ]
-
-        missing_fields = [
-            field
-            for field in required_fields
-            if body.get(field) is None
-        ]
+        required_fields = ["latitude", "longitude", "serviceId"]
+        missing_fields = [f for f in required_fields if body.get(f) is None]
 
         if missing_fields:
-            return construct_response(
-                HTTP_BAD_REQUEST,
-                {
-                    "success": False,
-                    "message": f"Missing required fields: {', '.join(missing_fields)}"
-                }
-            )
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": f"Missing required fields: {', '.join(missing_fields)}"
+            })
 
         latitude = float(body["latitude"])
         longitude = float(body["longitude"])
         service_id = int(body["serviceId"])
-
         radius = float(body.get("radius", 10))
         limit = int(body.get("limit", 20))
+        sort_by = body.get("sortBy", "nearest")
 
+        # Validate coordinates
+        if not (-90 <= latitude <= 90):
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "Latitude must be between -90 and 90."
+            })
+        if not (-180 <= longitude <= 180):
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "Longitude must be between -180 and 180."
+            })
+
+        # --- Build sort clause based on sortBy param ---
+        sort_clauses = {
+            "nearest": "distance ASC, average_rating DESC",
+            "top_rated": "average_rating DESC, total_reviews DESC, distance ASC",
+            "most_experienced": "years_of_experience DESC, average_rating DESC, distance ASC"
+        }
+        order_by = sort_clauses.get(sort_by, sort_clauses["nearest"])
+
+        # --- Query nearby artisans (subquery to avoid HAVING without GROUP BY) ---
         with connection.cursor(pymysql.cursors.DictCursor) as cursor:
-
-            sql = """
-                SELECT
-
-                    a.artisan_id,
-                    a.business_name,
-                    a.years_of_experience,
-                    a.average_rating,
-                    a.total_reviews,
-
-                    u.first_name,
-                    u.last_name,
-                    u.phone_number,
-
-                    ad.label,
-                    ad.address,
-                    ad.city,
-                    ad.state,
-                    ad.latitude,
-                    ad.longitude,
-
-                    s.id AS service_id,
-                    s.name AS service_name,
-                    s.base_price,
-
-                    ats.custom_price,
-                    ats.estimated_duration,
-
-                    (
-                        ST_Distance_Sphere(
-                            POINT(ad.longitude, ad.latitude),
-                            POINT(%s, %s)
-                        ) / 1000
-                    ) AS distance
-
-                FROM tbl_artisans a
-
-                INNER JOIN tbl_users u
-                    ON u.user_id = a.user_id
-
-                INNER JOIN tbl_addresses ad
-                    ON ad.user_id = u.user_id
-
-                INNER JOIN tbl_artisan_services ats
-                    ON ats.artisan_id = a.artisan_id
-
-                INNER JOIN services s
-                    ON s.id = ats.service_id
-
-                WHERE
-                    ats.service_id = %s
-                    AND ats.is_active = 1
-                    AND a.is_available = 1
-                    AND a.verification_status = 'verified'
-
-                HAVING distance <= %s
-
-                ORDER BY
-                    distance ASC,
-                    a.average_rating DESC,
-                    a.total_reviews DESC
-
+            sql = f"""
+                SELECT * FROM (
+                    SELECT
+                        a.artisan_id,
+                        a.business_name,
+                        a.years_of_experience,
+                        a.average_rating,
+                        a.total_reviews,
+                        u.first_name,
+                        u.last_name,
+                        u.phone_number,
+                        ad.label AS address_label,
+                        ad.address,
+                        ad.city,
+                        ad.state,
+                        ad.latitude AS artisan_latitude,
+                        ad.longitude AS artisan_longitude,
+                        s.id AS service_id,
+                        s.name AS service_name,
+                        s.base_price,
+                        ats.custom_price,
+                        ats.estimated_duration,
+                        (
+                            ST_Distance_Sphere(
+                                POINT(ad.longitude, ad.latitude),
+                                POINT(%s, %s)
+                            ) / 1000
+                        ) AS distance
+                    FROM tbl_artisans a
+                    INNER JOIN tbl_users u
+                        ON u.user_id = a.user_id
+                    INNER JOIN tbl_addresses ad
+                        ON ad.id = (
+                            SELECT MIN(ad2.id) FROM tbl_addresses ad2
+                            WHERE ad2.user_id = u.user_id AND ad2.latitude IS NOT NULL
+                        )
+                    INNER JOIN tbl_artisan_services ats
+                        ON ats.artisan_id = a.artisan_id
+                    INNER JOIN services s
+                        ON s.id = ats.service_id
+                    WHERE
+                        ats.service_id = %s
+                        AND ats.is_active = 1
+                        AND a.is_available = 1
+                        AND a.verification_status = 'verified'
+                        AND u.is_active = 1
+                ) AS results
+                WHERE distance <= %s
+                ORDER BY {order_by}
                 LIMIT %s
             """
 
-            cursor.execute(
-                sql,
-                (
-                    longitude,
-                    latitude,
-                    service_id,
-                    radius,
-                    limit
-                )
-            )
+            cursor.execute(sql, (
+                longitude,   # POINT(lng, lat) — longitude first
+                latitude,
+                service_id,
+                radius,
+                limit
+            ))
 
             artisans = cursor.fetchall()
 
-        return construct_response(
-            HTTP_OK,
-            {
-                "success": True,
-                "customer_id": user["user_id"],
-                "service_id": service_id,
-                "radius_km": radius,
-                "count": len(artisans),
-                "artisans": artisans
-            }
-        )
+        # Convert Decimal fields to float for JSON serialization
+        for artisan in artisans:
+            if artisan.get("distance") is not None:
+                artisan["distance"] = round(float(artisan["distance"]), 2)
+            if artisan.get("average_rating") is not None:
+                artisan["average_rating"] = float(artisan["average_rating"])
+            if artisan.get("base_price") is not None:
+                artisan["base_price"] = float(artisan["base_price"])
+            if artisan.get("custom_price") is not None:
+                artisan["custom_price"] = float(artisan["custom_price"])
+
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "customer_id": user["user_id"],
+            "service_id": service_id,
+            "sort_by": sort_by,
+            "radius_km": radius,
+            "count": len(artisans),
+            "artisans": artisans
+        })
 
     except ValueError:
+        return construct_response(HTTP_BAD_REQUEST, {
+            "success": False,
+            "message": "latitude, longitude, radius, limit and serviceId must be numeric."
+        })
 
-        return construct_response(
-            HTTP_BAD_REQUEST,
-            {
-                "success": False,
-                "message": "Latitude, longitude, radius, limit and serviceId must be numeric."
-            }
-        )
+    except json.JSONDecodeError:
+        return construct_response(HTTP_BAD_REQUEST, {
+            "success": False,
+            "message": "Invalid JSON in request body."
+        })
 
     except Exception as e:
-
         logger.exception("searchNearbyArtisans failed")
-
-        return construct_response(
-            HTTP_INTERNAL_ERROR,
-            {
-                "success": False,
-                "message": "Internal server error.",
-                "error": str(e)
-            }
-        )
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error."
+        })
 
 def updateArtisanAvailability(event, context):
     """
