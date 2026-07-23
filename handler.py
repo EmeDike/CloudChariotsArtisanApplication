@@ -1196,142 +1196,114 @@ def updateJobRequestStatus(event, context):
         }
 
 def createBooking(event, context):
+    """
+    Create a new booking between a customer and an artisan.
 
+    Request body (POST):
+      - artisan_id (int): The artisan's ID (required)
+      - service_id (int): The service being booked (required - used to look up price)
+      - booking_date (str): Date in YYYY-MM-DD format (required)
+      - booking_time (str): Time in HH:MM format (required)
+      - description (str): Description of work needed (required)
+      - address (str): Service location address (required)
+      - estimated_price (float): Estimated/agreed price (optional)
+    """
     try:
-
+        # --- Auth ---
         claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
         cognito_sub = claims["sub"]
 
-        body = event.get("body")
-
-        if isinstance(body, str):
-            body = json.loads(body)
-
-        required_fields = [
-            "jobRequestId",
-            "artisanId",
-            "bookingDate",
-            "serviceAddress",
-            "agreedAmount"
-        ]
-
-        missing_fields = [
-            field for field in required_fields
-            if not body.get(field)
-        ]
-
-        if missing_fields:
-            return {
-                "statusCode": 400,
-                "body": json.dumps({
-                    "success": False,
-                    "message": f"Missing required fields: {', '.join(missing_fields)}"
-                })
-            }
+        connection.ping(reconnect=True)
 
         with connection.cursor(pymysql.cursors.DictCursor) as cursor:
-
             cursor.execute(
-                """
-                SELECT user_id
-                FROM tbl_users
-                WHERE cognito_sub = %s
-                LIMIT 1
-                """,
+                "SELECT user_id, role, is_active FROM tbl_users WHERE cognito_sub = %s LIMIT 1",
                 (cognito_sub,)
             )
+            user = cursor.fetchone()
 
-            customer = cursor.fetchone()
+        if not user:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Authenticated user not found."
+            })
 
-            if not customer:
-                return {
-                    "statusCode": 404,
-                    "body": json.dumps({
-                        "success": False,
-                        "message": "Authenticated customer not found."
-                    })
-                }
+        if user["role"].lower() != "customer":
+            return construct_response(HTTP_FORBIDDEN, {
+                "success": False,
+                "message": "Only customers can create bookings."
+            })
 
-            customer_id = customer["user_id"]
+        if user["is_active"] != 1:
+            return construct_response(HTTP_FORBIDDEN, {
+                "success": False,
+                "message": "Your account is inactive."
+            })
 
+        customer_id = user["user_id"]
+
+        # --- Parse body ---
+        body = event.get("body")
+        if isinstance(body, str):
+            body = json.loads(body)
+        if body is None:
+            body = {}
+
+        required_fields = ["artisan_id", "booking_date", "booking_time", "description", "address"]
+        missing_fields = [f for f in required_fields if not body.get(f)]
+        if missing_fields:
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": f"Missing required fields: {', '.join(missing_fields)}"
+            })
+
+        artisan_id = int(body["artisan_id"])
+        booking_date = body["booking_date"]  # YYYY-MM-DD
+        booking_time = body["booking_time"]  # HH:MM
+        description = body["description"].strip()
+        address = body["address"].strip()
+        estimated_price = float(body.get("estimated_price", 0))
+
+        # Combine date and time into datetime for the DB column
+        booking_datetime = f"{booking_date} {booking_time}:00"
+
+        # --- Validate artisan exists and is available ---
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT
-                    job_request_id,
-                    customer_id,
-                    artisan_id,
-                    status
-                FROM tbl_job_requests
-                WHERE job_request_id = %s
+                SELECT a.artisan_id, a.is_available, a.verification_status, u.first_name, u.last_name
+                FROM tbl_artisans a
+                INNER JOIN tbl_users u ON u.user_id = a.user_id
+                WHERE a.artisan_id = %s
                 LIMIT 1
                 """,
-                (body["jobRequestId"],)
+                (artisan_id,)
             )
+            artisan = cursor.fetchone()
 
-            job_request = cursor.fetchone()
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan not found."
+            })
 
-            if not job_request:
-                return {
-                    "statusCode": 404,
-                    "body": json.dumps({
-                        "success": False,
-                        "message": "Job request not found."
-                    })
-                }
+        if artisan["is_available"] != 1:
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "This artisan is currently unavailable for bookings."
+            })
 
-            if job_request["customer_id"] != customer_id:
-                return {
-                    "statusCode": 403,
-                    "body": json.dumps({
-                        "success": False,
-                        "message": "You are not authorized to book this job request."
-                    })
-                }
+        if artisan["verification_status"] != "verified":
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "This artisan is not yet verified."
+            })
 
-            if job_request["status"] != "accepted":
-                return {
-                    "statusCode": 400,
-                    "body": json.dumps({
-                        "success": False,
-                        "message": "This job request has not been accepted by an artisan."
-                    })
-                }
-
-            if job_request["artisan_id"] != body["artisanId"]:
-                return {
-                    "statusCode": 400,
-                    "body": json.dumps({
-                        "success": False,
-                        "message": "The selected artisan did not accept this job request."
-                    })
-                }
-
+        # --- Create booking (matches existing tbl_bookings schema) ---
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT booking_id
-                FROM tbl_bookings
-                WHERE job_request_id = %s
-                LIMIT 1
-                """,
-                (body["jobRequestId"],)
-            )
-
-            existing_booking = cursor.fetchone()
-
-            if existing_booking:
-                return {
-                    "statusCode": 409,
-                    "body": json.dumps({
-                        "success": False,
-                        "message": "A booking already exists for this job request."
-                    })
-                }
-
-            cursor.execute(
-                """
-                INSERT INTO tbl_bookings
-                (
-                    job_request_id,
+                INSERT INTO tbl_bookings (
                     customer_id,
                     artisan_id,
                     booking_date,
@@ -1339,54 +1311,53 @@ def createBooking(event, context):
                     agreed_amount,
                     booking_status,
                     customer_notes,
-                    artisan_notes
-                )
-                VALUES
-                (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    created_at,
+                    updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                 """,
                 (
-                    body["jobRequestId"],
                     customer_id,
-                    body["artisanId"],
-                    body["bookingDate"],
-                    body["serviceAddress"],
-                    body["agreedAmount"],
-                    "scheduled",
-                    body.get("customerNotes"),
-                    body.get("artisanNotes")
+                    artisan_id,
+                    booking_datetime,
+                    address,
+                    estimated_price,
+                    'pending',
+                    description
                 )
             )
-
+            connection.commit()
             booking_id = cursor.lastrowid
 
-        connection.commit()
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "message": "Booking created successfully.",
+            "booking": {
+                "booking_id": booking_id,
+                "customer_id": customer_id,
+                "artisan_id": artisan_id,
+                "artisan_name": f"{artisan['first_name']} {artisan['last_name']}",
+                "booking_date": booking_date,
+                "booking_time": booking_time,
+                "service_address": address,
+                "agreed_amount": estimated_price,
+                "booking_status": "pending",
+                "customer_notes": description
+            }
+        })
 
-        return {
-            "statusCode": 201,
-            "body": json.dumps({
-                "success": True,
-                "bookingId": booking_id,
-                "customerId": customer_id,
-                "bookingStatus": "scheduled",
-                "message": "Booking created successfully."
-            })
-        }
+    except json.JSONDecodeError:
+        return construct_response(HTTP_BAD_REQUEST, {
+            "success": False,
+            "message": "Invalid JSON in request body."
+        })
 
     except Exception as e:
+        logger.exception("createBooking failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error."
+        })
 
-        try:
-            connection.rollback()
-        except:
-            pass
-
-        return {
-            "statusCode": 500,
-            "body": json.dumps({
-                "success": False,
-                "message": "Internal server error.",
-                "error": str(e)
-            })
-        }
 
 def getCustomerBookings(event, context):
 
