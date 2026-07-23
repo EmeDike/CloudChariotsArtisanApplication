@@ -1693,20 +1693,32 @@ def createReview(event, context):
             })
         }
 
+def construct_response(status_code, body):
+    return {
+        "statusCode": status_code,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+        },
+        "body": json.dumps(body, default=str)
+    }
+
+
 def searchNearbyArtisans(event, context):
     """
     Search for verified, available artisans near a customer's location
-    who offer a specific service.
+    who offer ANY service within a given category (list of service ids).
 
     Request body (POST):
-        - latitude (float): Customer's latitude (required)
-        - longitude (float): Customer's longitude (required)
-        - serviceId (int): The service to search for (required)
-        - radius (float): Search radius in km (optional, default: 10)
-        - limit (int): Max results (optional, default: 20)
-        - sortBy (str): "nearest" | "top_rated" | "most_experienced" (optional, default: "nearest")
+      - latitude (float): Customer's latitude (required)
+      - longitude (float): Customer's longitude (required)
+      - serviceIds (list[int]): The services to search for (required)
+            e.g. [51,52,53,54,55] for "Electrician"
+      - serviceId (int): Backward-compatible single-id alternative to serviceIds
+      - radius (float): Search radius in km (optional, default: 10)
+      - limit (int): Max results (optional, default: 20)
+      - sortBy (str): "nearest" | "top_rated" | "most_experienced" (optional, default: "nearest")
     """
-
     try:
         # --- Auth: extract user from Cognito JWT ---
         claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
@@ -1726,23 +1738,23 @@ def searchNearbyArtisans(event, context):
             )
             user = cursor.fetchone()
 
-            if not user:
-                return construct_response(HTTP_NOT_FOUND, {
-                    "success": False,
-                    "message": "Authenticated user not found."
-                })
+        if not user:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Authenticated user not found."
+            })
 
-            if user["role"].lower() != "customer":
-                return construct_response(HTTP_FORBIDDEN, {
-                    "success": False,
-                    "message": "Only customers can search for artisans."
-                })
+        if user["role"].lower() != "customer":
+            return construct_response(HTTP_FORBIDDEN, {
+                "success": False,
+                "message": "Only customers can search for artisans."
+            })
 
-            if user["is_active"] != 1:
-                return construct_response(HTTP_FORBIDDEN, {
-                    "success": False,
-                    "message": "Your account is inactive."
-                })
+        if user["is_active"] != 1:
+            return construct_response(HTTP_FORBIDDEN, {
+                "success": False,
+                "message": "Your account is inactive."
+            })
 
         # --- Parse & validate request body ---
         body = event.get("body")
@@ -1751,9 +1763,8 @@ def searchNearbyArtisans(event, context):
         if body is None:
             body = {}
 
-        required_fields = ["latitude", "longitude", "serviceId"]
+        required_fields = ["latitude", "longitude"]
         missing_fields = [f for f in required_fields if body.get(f) is None]
-
         if missing_fields:
             return construct_response(HTTP_BAD_REQUEST, {
                 "success": False,
@@ -1762,7 +1773,27 @@ def searchNearbyArtisans(event, context):
 
         latitude = float(body["latitude"])
         longitude = float(body["longitude"])
-        service_id = int(body["serviceId"])
+
+        # Accept either serviceIds (list) or serviceId (single, backward compatible)
+        raw_service_ids = body.get("serviceIds")
+        if not raw_service_ids:
+            single = body.get("serviceId")
+            raw_service_ids = [single] if single is not None else []
+
+        if not raw_service_ids:
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "serviceIds is required."
+            })
+
+        try:
+            service_ids = [int(sid) for sid in raw_service_ids]
+        except (TypeError, ValueError):
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "serviceIds must be a list of integers."
+            })
+
         radius = float(body.get("radius", 10))
         limit = int(body.get("limit", 20))
         sort_by = body.get("sortBy", "nearest")
@@ -1779,7 +1810,7 @@ def searchNearbyArtisans(event, context):
                 "message": "Longitude must be between -180 and 180."
             })
 
-        # --- Build sort clause based on sortBy param ---
+        # --- Build sort clause ---
         sort_clauses = {
             "nearest": "distance ASC, average_rating DESC",
             "top_rated": "average_rating DESC, total_reviews DESC, distance ASC",
@@ -1787,7 +1818,9 @@ def searchNearbyArtisans(event, context):
         }
         order_by = sort_clauses.get(sort_by, sort_clauses["nearest"])
 
-        # --- Query nearby artisans (subquery to avoid HAVING without GROUP BY) ---
+        placeholders = ",".join(["%s"] * len(service_ids))
+
+        # --- Query nearby artisans ---
         with connection.cursor(pymysql.cursors.DictCursor) as cursor:
             sql = f"""
                 SELECT * FROM (
@@ -1816,35 +1849,43 @@ def searchNearbyArtisans(event, context):
                                 POINT(ad.longitude, ad.latitude),
                                 POINT(%s, %s)
                             ) / 1000
-                        ) AS distance
+                        ) AS distance,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY a.artisan_id
+                            ORDER BY (
+                                ST_Distance_Sphere(
+                                    POINT(ad.longitude, ad.latitude),
+                                    POINT(%s, %s)
+                                )
+                            ) ASC
+                        ) AS rn
                     FROM tbl_artisans a
                     INNER JOIN tbl_users u
                         ON u.user_id = a.user_id
                     INNER JOIN tbl_addresses ad
-                        ON ad.id = (
-                            SELECT MIN(ad2.id) FROM tbl_addresses ad2
-                            WHERE ad2.user_id = u.user_id AND ad2.latitude IS NOT NULL
-                        )
+                        ON ad.user_id = u.user_id
+                        AND ad.latitude IS NOT NULL
                     INNER JOIN tbl_artisan_services ats
                         ON ats.artisan_id = a.artisan_id
                     INNER JOIN services s
                         ON s.id = ats.service_id
                     WHERE
-                        ats.service_id = %s
+                        ats.service_id IN ({placeholders})
                         AND ats.is_active = 1
                         AND a.is_available = 1
                         AND a.verification_status = 'verified'
                         AND u.is_active = 1
                 ) AS results
-                WHERE distance <= %s
+                WHERE rn = 1
+                  AND distance <= %s
                 ORDER BY {order_by}
                 LIMIT %s
             """
 
             cursor.execute(sql, (
-                longitude,   # POINT(lng, lat) — longitude first
-                latitude,
-                service_id,
+                longitude, latitude,
+                longitude, latitude,
+                *service_ids,
                 radius,
                 limit
             ))
@@ -1853,6 +1894,7 @@ def searchNearbyArtisans(event, context):
 
         # Convert Decimal fields to float for JSON serialization
         for artisan in artisans:
+            artisan.pop("rn", None)
             if artisan.get("distance") is not None:
                 artisan["distance"] = round(float(artisan["distance"]), 2)
             if artisan.get("average_rating") is not None:
@@ -1865,7 +1907,7 @@ def searchNearbyArtisans(event, context):
         return construct_response(HTTP_OK, {
             "success": True,
             "customer_id": user["user_id"],
-            "service_id": service_id,
+            "service_ids": service_ids,
             "sort_by": sort_by,
             "radius_km": radius,
             "count": len(artisans),
@@ -1875,7 +1917,7 @@ def searchNearbyArtisans(event, context):
     except ValueError:
         return construct_response(HTTP_BAD_REQUEST, {
             "success": False,
-            "message": "latitude, longitude, radius, limit and serviceId must be numeric."
+            "message": "latitude, longitude, radius, limit and serviceIds must be numeric."
         })
 
     except json.JSONDecodeError:
@@ -1890,6 +1932,7 @@ def searchNearbyArtisans(event, context):
             "success": False,
             "message": "Internal server error."
         })
+
 
 def updateArtisanAvailability(event, context):
     """
