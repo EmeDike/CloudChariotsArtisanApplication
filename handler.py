@@ -1358,13 +1358,16 @@ def createBooking(event, context):
             "message": "Internal server error."
         })
 
-
 def getCustomerBookings(event, context):
-
+    """
+    Get all bookings for the authenticated customer.
+    Uses LEFT JOIN on tbl_job_requests so bookings without a job_request_id still appear.
+    """
     try:
-
         claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
         cognito_sub = claims["sub"]
+
+        connection.ping(reconnect=True)
 
         with connection.cursor(pymysql.cursors.DictCursor) as cursor:
 
@@ -1381,13 +1384,10 @@ def getCustomerBookings(event, context):
             customer = cursor.fetchone()
 
             if not customer:
-                return {
-                    "statusCode": 404,
-                    "body": json.dumps({
-                        "success": False,
-                        "message": "Authenticated customer not found."
-                    })
-                }
+                return construct_response(HTTP_NOT_FOUND, {
+                    "success": False,
+                    "message": "Authenticated customer not found."
+                })
 
             customer_id = customer["user_id"]
 
@@ -1410,7 +1410,7 @@ def getCustomerBookings(event, context):
                     u.last_name AS artisan_last_name,
                     u.phone_number AS artisan_phone
                 FROM tbl_bookings b
-                JOIN tbl_job_requests jr ON jr.job_request_id = b.job_request_id
+                LEFT JOIN tbl_job_requests jr ON jr.job_request_id = b.job_request_id
                 JOIN tbl_users u ON u.user_id = b.artisan_id
                 WHERE b.customer_id = %s
                 ORDER BY b.created_at DESC
@@ -1420,32 +1420,26 @@ def getCustomerBookings(event, context):
 
             bookings = cursor.fetchall()
 
-        return {
-            "statusCode": 200,
-            "body": json.dumps({
-                "success": True,
-                "customerId": customer_id,
-                "total": len(bookings),
-                "bookings": bookings,
-                "message": "Bookings retrieved successfully."
-            }, default=str)
-        }
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "customerId": customer_id,
+            "total": len(bookings),
+            "bookings": bookings,
+            "message": "Bookings retrieved successfully."
+        })
 
     except Exception as e:
+        logger.exception("getCustomerBookings failed")
 
         try:
             connection.rollback()
         except:
             pass
 
-        return {
-            "statusCode": 500,
-            "body": json.dumps({
-                "success": False,
-                "message": "Internal server error.",
-                "error": str(e)
-            })
-        }
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error."
+        })
 
 def createReview(event, context):
 
