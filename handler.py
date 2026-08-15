@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import boto3
 import pymysql
@@ -34,6 +34,27 @@ ALLOWED_ROLES = [
     "artisan",
     "customer"
 ]
+
+def get_artisan_from_token(event):
+    """
+    Extract artisan_id from Cognito JWT claims.
+    Flow: JWT → cognito_sub → tbl_users.user_id → tbl_artisans.artisan_id
+    """
+    claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
+    cognito_sub = claims["sub"]
+
+    connection.ping(reconnect=True)
+    with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+        cursor.execute("""
+            SELECT a.artisan_id, a.business_name, a.is_available,
+                   a.verification_status, a.average_rating, a.total_reviews,
+                   u.user_id, u.first_name, u.last_name, u.email, u.phone_number
+            FROM tbl_users u
+            INNER JOIN tbl_artisans a ON a.user_id = u.user_id
+            WHERE u.cognito_sub = %s
+            LIMIT 1
+        """, (cognito_sub,))
+        return cursor.fetchone()
 
 def user_login(event, context):
     body = json.loads(event.get("body", "{}"))
@@ -2012,4 +2033,1522 @@ def updateArtisanAvailability(event, context):
         return construct_response(HTTP_INTERNAL_ERROR, {
             "error": "Failed to update artisan availability",
             "details": str(e)
+        })
+
+def getDashboard(event, context):
+    """
+    GET /artisan/dashboard
+    Returns: profile summary, wallet, earnings, job stats, recent activity
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        artisan_id = artisan["artisan_id"]
+        today = datetime.utcnow().date()
+        week_start = today - timedelta(days=today.weekday())  # Monday
+        month_start = today.replace(day=1)
+
+        connection.ping(reconnect=True)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            # ---- Wallet Balance ----
+            cursor.execute("""
+                SELECT COALESCE(available_balance, 0) AS available_balance,
+                       COALESCE(pending_balance, 0) AS pending_balance,
+                       COALESCE(total_withdrawn, 0) AS total_withdrawn
+                FROM tbl_wallets
+                WHERE artisan_id = %s
+            """, (artisan_id,))
+            wallet = cursor.fetchone() or {
+                "available_balance": 0, "pending_balance": 0, "total_withdrawn": 0
+            }
+
+            # ---- Earnings Today ----
+            cursor.execute("""
+                SELECT COALESCE(SUM(net_amount), 0) AS total
+                FROM tbl_payments
+                WHERE artisan_id = %s
+                  AND status = 'completed'
+                  AND DATE(paid_at) = %s
+            """, (artisan_id, today))
+            earnings_today = cursor.fetchone()["total"]
+
+            # ---- Earnings This Week ----
+            cursor.execute("""
+                SELECT COALESCE(SUM(net_amount), 0) AS total
+                FROM tbl_payments
+                WHERE artisan_id = %s
+                  AND status = 'completed'
+                  AND paid_at >= %s
+            """, (artisan_id, week_start))
+            earnings_week = cursor.fetchone()["total"]
+
+            # ---- Earnings This Month ----
+            cursor.execute("""
+                SELECT COALESCE(SUM(net_amount), 0) AS total
+                FROM tbl_payments
+                WHERE artisan_id = %s
+                  AND status = 'completed'
+                  AND paid_at >= %s
+            """, (artisan_id, month_start))
+            earnings_month = cursor.fetchone()["total"]
+
+            # ---- Weekly Breakdown (by day) ----
+            cursor.execute("""
+                SELECT DATE(paid_at) AS date,
+                       DAYNAME(paid_at) AS day_name,
+                       COALESCE(SUM(net_amount), 0) AS total
+                FROM tbl_payments
+                WHERE artisan_id = %s
+                  AND status = 'completed'
+                  AND paid_at >= %s
+                GROUP BY DATE(paid_at), DAYNAME(paid_at)
+                ORDER BY DATE(paid_at)
+            """, (artisan_id, week_start))
+            weekly_breakdown = cursor.fetchall()
+
+            # ---- Job Stats ----
+            cursor.execute("""
+                SELECT
+                    SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_requests,
+                    SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END) AS accepted_requests
+                FROM tbl_job_requests
+                WHERE artisan_id = %s
+            """, (artisan_id,))
+            request_stats = cursor.fetchone()
+
+            cursor.execute("""
+                SELECT
+                    SUM(CASE WHEN booking_status = 'pending' THEN 1 ELSE 0 END) AS pending_bookings,
+                    SUM(CASE WHEN booking_status = 'confirmed' THEN 1 ELSE 0 END) AS confirmed_bookings,
+                    SUM(CASE WHEN booking_status = 'in_progress' THEN 1 ELSE 0 END) AS active_jobs,
+                    SUM(CASE WHEN booking_status = 'completed' THEN 1 ELSE 0 END) AS completed_jobs,
+                    SUM(CASE WHEN booking_status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_jobs
+                FROM tbl_bookings
+                WHERE artisan_id = %s
+            """, (artisan_id,))
+            booking_stats = cursor.fetchone()
+
+            # ---- Upcoming Bookings (next 5) ----
+            cursor.execute("""
+                SELECT b.booking_id, b.booking_date, b.service_address,
+                       b.agreed_amount, b.booking_status, b.customer_notes,
+                       u.first_name AS customer_first_name,
+                       u.last_name AS customer_last_name,
+                       u.phone_number AS customer_phone
+                FROM tbl_bookings b
+                INNER JOIN tbl_users u ON u.user_id = b.customer_id
+                WHERE b.artisan_id = %s
+                  AND b.booking_status IN ('pending', 'confirmed')
+                  AND b.booking_date >= %s
+                ORDER BY b.booking_date ASC
+                LIMIT 5
+            """, (artisan_id, today))
+            upcoming_bookings = cursor.fetchall()
+
+            # ---- Recent Job Requests (latest 5 pending) ----
+            cursor.execute("""
+                SELECT jr.job_request_id, jr.title, jr.description,
+                       jr.location_address, jr.preferred_date, jr.status,
+                       jr.created_at,
+                       u.first_name AS customer_first_name,
+                       u.last_name AS customer_last_name
+                FROM tbl_job_requests jr
+                INNER JOIN tbl_users u ON u.user_id = jr.customer_id
+                WHERE jr.artisan_id = %s
+                  AND jr.status = 'pending'
+                ORDER BY jr.created_at DESC
+                LIMIT 5
+            """, (artisan_id,))
+            pending_requests = cursor.fetchall()
+
+            # ---- Recent Reviews (latest 3) ----
+            cursor.execute("""
+                SELECT r.review_id, r.rating, r.review_text, r.created_at,
+                       u.first_name AS customer_first_name,
+                       u.last_name AS customer_last_name
+                FROM tbl_reviews r
+                INNER JOIN tbl_users u ON u.user_id = r.customer_id
+                WHERE r.artisan_id = %s
+                ORDER BY r.created_at DESC
+                LIMIT 3
+            """, (artisan_id,))
+            recent_reviews = cursor.fetchall()
+
+            # ---- Unread Notifications Count ----
+            cursor.execute("""
+                SELECT COUNT(*) AS count
+                FROM tbl_notifications
+                WHERE artisan_id = %s AND is_read = 0
+            """, (artisan_id,))
+            unread_notifications = cursor.fetchone()["count"]
+
+        # ---- Build Response ----
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "data": {
+                "profile": {
+                    "artisan_id": artisan["artisan_id"],
+                    "first_name": artisan["first_name"],
+                    "last_name": artisan["last_name"],
+                    "business_name": artisan["business_name"],
+                    "average_rating": float(artisan["average_rating"] or 0),
+                    "total_reviews": artisan["total_reviews"],
+                    "is_available": bool(artisan["is_available"]),
+                    "verification_status": artisan["verification_status"]
+                },
+                "wallet": {
+                    "available_balance": float(wallet["available_balance"]),
+                    "pending_balance": float(wallet["pending_balance"]),
+                    "total_withdrawn": float(wallet["total_withdrawn"])
+                },
+                "earnings": {
+                    "today": float(earnings_today),
+                    "this_week": float(earnings_week),
+                    "this_month": float(earnings_month),
+                    "weekly_breakdown": weekly_breakdown
+                },
+                "jobs": {
+                    "pending_requests": int(request_stats["pending_requests"] or 0),
+                    "accepted_requests": int(request_stats["accepted_requests"] or 0),
+                    "pending_bookings": int(booking_stats["pending_bookings"] or 0),
+                    "confirmed_bookings": int(booking_stats["confirmed_bookings"] or 0),
+                    "active_jobs": int(booking_stats["active_jobs"] or 0),
+                    "completed_jobs": int(booking_stats["completed_jobs"] or 0),
+                    "cancelled_jobs": int(booking_stats["cancelled_jobs"] or 0)
+                },
+                "upcoming_bookings": upcoming_bookings,
+                "pending_requests": pending_requests,
+                "recent_reviews": recent_reviews,
+                "unread_notifications": unread_notifications
+            }
+        })
+
+    except Exception as e:
+        logger.exception("getDashboard failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 2. PUT /artisan/toggle-availability
+#    Toggle artisan online/offline status
+# ============================================================
+
+def toggleAvailability(event, context):
+    """
+    PUT /artisan/toggle-availability
+    Body: { "is_available": true/false }
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        body = parse_body(event)
+        is_available = body.get("is_available")
+
+        if is_available is None:
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "is_available (true/false) is required."
+            })
+
+        new_status = 1 if is_available else 0
+
+        connection.ping(reconnect=True)
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                UPDATE tbl_artisans
+                SET is_available = %s, updated_at = NOW()
+                WHERE artisan_id = %s
+            """, (new_status, artisan["artisan_id"]))
+            connection.commit()
+
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "message": f"Availability set to {'available' if new_status else 'offline'}.",
+            "is_available": bool(new_status)
+        })
+
+    except Exception as e:
+        logger.exception("toggleAvailability failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 3. GET /artisan/earnings
+#    Detailed earnings with filters
+# ============================================================
+
+def getEarnings(event, context):
+    """
+    GET /artisan/earnings?period=week|month|year|all&page=1&limit=20
+    Returns: earnings summary + transaction history
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        artisan_id = artisan["artisan_id"]
+        params = event.get("queryStringParameters") or {}
+        period = params.get("period", "week")
+        page = max(int(params.get("page", 1)), 1)
+        limit = min(int(params.get("limit", 20)), 100)
+        offset = (page - 1) * limit
+
+        today = datetime.utcnow().date()
+
+        # Determine date filter
+        if period == "today":
+            date_filter = today
+        elif period == "week":
+            date_filter = today - timedelta(days=today.weekday())
+        elif period == "month":
+            date_filter = today.replace(day=1)
+        elif period == "year":
+            date_filter = today.replace(month=1, day=1)
+        else:
+            date_filter = None  # all time
+
+        connection.ping(reconnect=True)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            # Total earnings for period
+            if date_filter:
+                cursor.execute("""
+                    SELECT COALESCE(SUM(net_amount), 0) AS total_earnings,
+                           COUNT(*) AS total_transactions
+                    FROM tbl_payments
+                    WHERE artisan_id = %s AND status = 'completed' AND paid_at >= %s
+                """, (artisan_id, date_filter))
+            else:
+                cursor.execute("""
+                    SELECT COALESCE(SUM(net_amount), 0) AS total_earnings,
+                           COUNT(*) AS total_transactions
+                    FROM tbl_payments
+                    WHERE artisan_id = %s AND status = 'completed'
+                """, (artisan_id,))
+
+            summary = cursor.fetchone()
+
+            # Transaction list (paginated)
+            if date_filter:
+                cursor.execute("""
+                    SELECT p.payment_id, p.amount, p.platform_fee, p.net_amount,
+                           p.payment_method, p.status, p.description, p.paid_at,
+                           b.booking_id, b.customer_notes,
+                           u.first_name AS customer_first_name,
+                           u.last_name AS customer_last_name
+                    FROM tbl_payments p
+                    LEFT JOIN tbl_bookings b ON b.booking_id = p.booking_id
+                    LEFT JOIN tbl_users u ON u.user_id = p.customer_id
+                    WHERE p.artisan_id = %s AND p.status = 'completed' AND p.paid_at >= %s
+                    ORDER BY p.paid_at DESC
+                    LIMIT %s OFFSET %s
+                """, (artisan_id, date_filter, limit, offset))
+            else:
+                cursor.execute("""
+                    SELECT p.payment_id, p.amount, p.platform_fee, p.net_amount,
+                           p.payment_method, p.status, p.description, p.paid_at,
+                           b.booking_id, b.customer_notes,
+                           u.first_name AS customer_first_name,
+                           u.last_name AS customer_last_name
+                    FROM tbl_payments p
+                    LEFT JOIN tbl_bookings b ON b.booking_id = p.booking_id
+                    LEFT JOIN tbl_users u ON u.user_id = p.customer_id
+                    WHERE p.artisan_id = %s AND p.status = 'completed'
+                    ORDER BY p.paid_at DESC
+                    LIMIT %s OFFSET %s
+                """, (artisan_id, limit, offset))
+
+            transactions = cursor.fetchall()
+
+            # Wallet balance
+            cursor.execute("""
+                SELECT COALESCE(available_balance, 0) AS available_balance,
+                       COALESCE(pending_balance, 0) AS pending_balance
+                FROM tbl_wallets WHERE artisan_id = %s
+            """, (artisan_id,))
+            wallet = cursor.fetchone() or {"available_balance": 0, "pending_balance": 0}
+
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "data": {
+                "period": period,
+                "total_earnings": float(summary["total_earnings"]),
+                "total_transactions": summary["total_transactions"],
+                "wallet_balance": float(wallet["available_balance"]),
+                "pending_balance": float(wallet["pending_balance"]),
+                "transactions": transactions,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": summary["total_transactions"]
+                }
+            }
+        })
+
+    except Exception as e:
+        logger.exception("getEarnings failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 4. GET /artisan/jobs
+#    All jobs with status filter
+# ============================================================
+
+def getJobs(event, context):
+    """
+    GET /artisan/jobs?status=pending|confirmed|in_progress|completed|cancelled&page=1&limit=20
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        artisan_id = artisan["artisan_id"]
+        params = event.get("queryStringParameters") or {}
+        status_filter = params.get("status")
+        page = max(int(params.get("page", 1)), 1)
+        limit = min(int(params.get("limit", 20)), 100)
+        offset = (page - 1) * limit
+
+        connection.ping(reconnect=True)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            # Build query
+            base_query = """
+                SELECT b.booking_id, b.job_request_id, b.booking_date,
+                       b.service_address, b.agreed_amount, b.booking_status,
+                       b.customer_notes, b.artisan_notes, b.created_at,
+                       u.first_name AS customer_first_name,
+                       u.last_name AS customer_last_name,
+                       u.phone_number AS customer_phone
+                FROM tbl_bookings b
+                INNER JOIN tbl_users u ON u.user_id = b.customer_id
+                WHERE b.artisan_id = %s
+            """
+            query_params = [artisan_id]
+
+            if status_filter:
+                base_query += " AND b.booking_status = %s"
+                query_params.append(status_filter)
+
+            # Count total
+            count_query = f"SELECT COUNT(*) AS total FROM ({base_query}) AS sub"
+            cursor.execute(count_query, query_params)
+            total = cursor.fetchone()["total"]
+
+            # Fetch page
+            base_query += " ORDER BY b.created_at DESC LIMIT %s OFFSET %s"
+            query_params.extend([limit, offset])
+            cursor.execute(base_query, query_params)
+            bookings = cursor.fetchall()
+
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "data": {
+                "bookings": bookings,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total
+                }
+            }
+        })
+
+    except Exception as e:
+        logger.exception("getJobs failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 5. GET /artisan/job-requests
+#    Pending job requests for the artisan
+# ============================================================
+
+def getJobRequests(event, context):
+    """
+    GET /artisan/job-requests?status=pending|accepted|declined&page=1&limit=20
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        artisan_id = artisan["artisan_id"]
+        params = event.get("queryStringParameters") or {}
+        status_filter = params.get("status", "pending")
+        page = max(int(params.get("page", 1)), 1)
+        limit = min(int(params.get("limit", 20)), 100)
+        offset = (page - 1) * limit
+
+        connection.ping(reconnect=True)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            cursor.execute("""
+                SELECT COUNT(*) AS total
+                FROM tbl_job_requests
+                WHERE artisan_id = %s AND status = %s
+            """, (artisan_id, status_filter))
+            total = cursor.fetchone()["total"]
+
+            cursor.execute("""
+                SELECT jr.job_request_id, jr.customer_id, jr.service_id,
+                       jr.title, jr.description, jr.location_address,
+                       jr.preferred_date, jr.status, jr.created_at,
+                       u.first_name AS customer_first_name,
+                       u.last_name AS customer_last_name,
+                       u.phone_number AS customer_phone,
+                       s.name AS service_name
+                FROM tbl_job_requests jr
+                INNER JOIN tbl_users u ON u.user_id = jr.customer_id
+                LEFT JOIN services s ON s.id = jr.service_id
+                WHERE jr.artisan_id = %s AND jr.status = %s
+                ORDER BY jr.created_at DESC
+                LIMIT %s OFFSET %s
+            """, (artisan_id, status_filter, limit, offset))
+            requests = cursor.fetchall()
+
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "data": {
+                "requests": requests,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total
+                }
+            }
+        })
+
+    except Exception as e:
+        logger.exception("getJobRequests failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 6. PUT /artisan/job-requests/{jobRequestId}/respond
+#    Accept or decline a job request
+# ============================================================
+
+def respondToJobRequest(event, context):
+    """
+    PUT /artisan/job-requests/{jobRequestId}/respond
+    Body: { "status": "accepted" | "declined" }
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        artisan_id = artisan["artisan_id"]
+        path_params = event.get("pathParameters") or {}
+        job_request_id = path_params.get("jobRequestId")
+
+        if not job_request_id:
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "jobRequestId is required in path."
+            })
+
+        body = parse_body(event)
+        status = body.get("status")
+
+        if status not in ["accepted", "declined"]:
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "Status must be 'accepted' or 'declined'."
+            })
+
+        connection.ping(reconnect=True)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            # Verify request belongs to this artisan and is pending
+            cursor.execute("""
+                SELECT job_request_id, customer_id, service_id, title,
+                       description, location_address, preferred_date, status
+                FROM tbl_job_requests
+                WHERE job_request_id = %s AND artisan_id = %s
+                LIMIT 1
+            """, (job_request_id, artisan_id))
+            job_request = cursor.fetchone()
+
+            if not job_request:
+                return construct_response(HTTP_NOT_FOUND, {
+                    "success": False,
+                    "message": "Job request not found."
+                })
+
+            if job_request["status"] != "pending":
+                return construct_response(HTTP_BAD_REQUEST, {
+                    "success": False,
+                    "message": "This job request has already been processed."
+                })
+
+            if status == "accepted":
+                # Update request status
+                cursor.execute("""
+                    UPDATE tbl_job_requests
+                    SET status = 'accepted', updated_at = NOW()
+                    WHERE job_request_id = %s
+                """, (job_request_id,))
+
+                # Auto-create booking from accepted request
+                cursor.execute("""
+                    INSERT INTO tbl_bookings (
+                        customer_id, artisan_id, job_request_id,
+                        booking_date, service_address, booking_status,
+                        customer_notes, created_at, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, 'confirmed', %s, NOW(), NOW())
+                """, (
+                    job_request["customer_id"],
+                    artisan_id,
+                    job_request_id,
+                    job_request["preferred_date"],
+                    job_request["location_address"],
+                    job_request["description"]
+                ))
+                booking_id = cursor.lastrowid
+
+                connection.commit()
+
+                return construct_response(HTTP_OK, {
+                    "success": True,
+                    "message": "Job request accepted. Booking created.",
+                    "job_request_id": int(job_request_id),
+                    "booking_id": booking_id,
+                    "status": "accepted"
+                })
+
+            else:
+                # Decline
+                cursor.execute("""
+                    UPDATE tbl_job_requests
+                    SET status = 'declined', updated_at = NOW()
+                    WHERE job_request_id = %s
+                """, (job_request_id,))
+                connection.commit()
+
+                return construct_response(HTTP_OK, {
+                    "success": True,
+                    "message": "Job request declined.",
+                    "job_request_id": int(job_request_id),
+                    "status": "declined"
+                })
+
+    except Exception as e:
+        try:
+            connection.rollback()
+        except:
+            pass
+        logger.exception("respondToJobRequest failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 7. GET /artisan/reviews
+#    All reviews for the artisan
+# ============================================================
+
+def getReviews(event, context):
+    """
+    GET /artisan/reviews?page=1&limit=20
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        artisan_id = artisan["artisan_id"]
+        params = event.get("queryStringParameters") or {}
+        page = max(int(params.get("page", 1)), 1)
+        limit = min(int(params.get("limit", 20)), 100)
+        offset = (page - 1) * limit
+
+        connection.ping(reconnect=True)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            cursor.execute("""
+                SELECT COUNT(*) AS total FROM tbl_reviews WHERE artisan_id = %s
+            """, (artisan_id,))
+            total = cursor.fetchone()["total"]
+
+            cursor.execute("""
+                SELECT r.review_id, r.booking_id, r.rating, r.review_text,
+                       r.created_at,
+                       u.first_name AS customer_first_name,
+                       u.last_name AS customer_last_name
+                FROM tbl_reviews r
+                INNER JOIN tbl_users u ON u.user_id = r.customer_id
+                WHERE r.artisan_id = %s
+                ORDER BY r.created_at DESC
+                LIMIT %s OFFSET %s
+            """, (artisan_id, limit, offset))
+            reviews = cursor.fetchall()
+
+            # Rating breakdown
+            cursor.execute("""
+                SELECT rating, COUNT(*) AS count
+                FROM tbl_reviews
+                WHERE artisan_id = %s
+                GROUP BY rating
+                ORDER BY rating DESC
+            """, (artisan_id,))
+            rating_breakdown = cursor.fetchall()
+
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "data": {
+                "average_rating": float(artisan["average_rating"] or 0),
+                "total_reviews": artisan["total_reviews"],
+                "rating_breakdown": rating_breakdown,
+                "reviews": reviews,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total
+                }
+            }
+        })
+
+    except Exception as e:
+        logger.exception("getReviews failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 8. GET /artisan/notifications
+#    Notifications list
+# ============================================================
+
+def getNotifications(event, context):
+    """
+    GET /artisan/notifications?page=1&limit=30
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        artisan_id = artisan["artisan_id"]
+        params = event.get("queryStringParameters") or {}
+        page = max(int(params.get("page", 1)), 1)
+        limit = min(int(params.get("limit", 30)), 100)
+        offset = (page - 1) * limit
+
+        connection.ping(reconnect=True)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            cursor.execute("""
+                SELECT COUNT(*) AS total FROM tbl_notifications WHERE artisan_id = %s
+            """, (artisan_id,))
+            total = cursor.fetchone()["total"]
+
+            cursor.execute("""
+                SELECT COUNT(*) AS unread
+                FROM tbl_notifications
+                WHERE artisan_id = %s AND is_read = 0
+            """, (artisan_id,))
+            unread = cursor.fetchone()["unread"]
+
+            cursor.execute("""
+                SELECT id, type, title, body, data, is_read, created_at
+                FROM tbl_notifications
+                WHERE artisan_id = %s
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+            """, (artisan_id, limit, offset))
+            notifications = cursor.fetchall()
+
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "data": {
+                "unread_count": unread,
+                "notifications": notifications,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total
+                }
+            }
+        })
+
+    except Exception as e:
+        logger.exception("getNotifications failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 9. PUT /artisan/notifications/mark-read
+#    Mark notifications as read
+# ============================================================
+
+def markNotificationsRead(event, context):
+    """
+    PUT /artisan/notifications/mark-read
+    Body: { "notification_ids": [1, 2, 3] } OR { "mark_all": true }
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        artisan_id = artisan["artisan_id"]
+        body = parse_body(event)
+        mark_all = body.get("mark_all", False)
+        notification_ids = body.get("notification_ids", [])
+
+        connection.ping(reconnect=True)
+        with connection.cursor() as cursor:
+
+            if mark_all:
+                cursor.execute("""
+                    UPDATE tbl_notifications
+                    SET is_read = 1, read_at = NOW()
+                    WHERE artisan_id = %s AND is_read = 0
+                """, (artisan_id,))
+            elif notification_ids:
+                placeholders = ",".join(["%s"] * len(notification_ids))
+                cursor.execute(f"""
+                    UPDATE tbl_notifications
+                    SET is_read = 1, read_at = NOW()
+                    WHERE artisan_id = %s AND id IN ({placeholders}) AND is_read = 0
+                """, (artisan_id, *notification_ids))
+            else:
+                return construct_response(HTTP_BAD_REQUEST, {
+                    "success": False,
+                    "message": "Provide notification_ids or set mark_all to true."
+                })
+
+            updated = cursor.rowcount
+            connection.commit()
+
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "message": f"{updated} notification(s) marked as read.",
+            "updated_count": updated
+        })
+
+    except Exception as e:
+        logger.exception("markNotificationsRead failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 10. GET /artisan/profile
+#     Full artisan profile
+# ============================================================
+
+def getProfile(event, context):
+    """
+    GET /artisan/profile
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        artisan_id = artisan["artisan_id"]
+
+        connection.ping(reconnect=True)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            # Full artisan details
+            cursor.execute("""
+                SELECT a.*, u.first_name, u.last_name, u.email, u.phone_number
+                FROM tbl_artisans a
+                INNER JOIN tbl_users u ON u.user_id = a.user_id
+                WHERE a.artisan_id = %s
+            """, (artisan_id,))
+            profile = cursor.fetchone()
+
+            # Services offered
+            cursor.execute("""
+                SELECT ats.id, ats.service_id, ats.custom_price,
+                       ats.is_active, s.name AS service_name,
+                       sc.name AS category_name
+                FROM tbl_artisan_services ats
+                INNER JOIN services s ON s.id = ats.service_id
+                LEFT JOIN service_categories sc ON sc.id = s.category_id
+                WHERE ats.artisan_id = %s
+            """, (artisan_id,))
+            services = cursor.fetchall()
+
+            # Availability
+            cursor.execute("""
+                SELECT schedule_id, day_of_week, start_time, end_time, is_available
+                FROM tbl_artisan_availability
+                WHERE artisan_id = %s
+                ORDER BY FIELD(day_of_week, 'Monday', 'Tuesday', 'Wednesday',
+                               'Thursday', 'Friday', 'Saturday', 'Sunday')
+            """, (artisan_id,))
+            availability = cursor.fetchall()
+
+            # Address
+            cursor.execute("""
+                SELECT address_id, label, address, city, state, latitude, longitude
+                FROM tbl_addresses
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+            """, (artisan["user_id"],))
+            addresses = cursor.fetchall()
+
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "data": {
+                "profile": profile,
+                "services": services,
+                "availability": availability,
+                "addresses": addresses
+            }
+        })
+
+    except Exception as e:
+        logger.exception("getProfile failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 11. PUT /artisan/profile
+#     Update artisan profile
+# ============================================================
+
+def updateProfile(event, context):
+    """
+    PUT /artisan/profile
+    Body: { "business_name": "...", "bio": "...", "years_of_experience": 5 }
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        body = parse_body(event)
+
+        # Allowed fields to update
+        allowed_fields = [
+            "business_name", "bio", "years_of_experience"
+        ]
+
+        updates = []
+        values = []
+        for field in allowed_fields:
+            if field in body:
+                updates.append(f"{field} = %s")
+                values.append(body[field])
+
+        if not updates:
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "No valid fields to update."
+            })
+
+        values.append(artisan["artisan_id"])
+
+        connection.ping(reconnect=True)
+        with connection.cursor() as cursor:
+            cursor.execute(f"""
+                UPDATE tbl_artisans
+                SET {', '.join(updates)}, updated_at = NOW()
+                WHERE artisan_id = %s
+            """, values)
+            connection.commit()
+
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "message": "Profile updated successfully."
+        })
+
+    except Exception as e:
+        logger.exception("updateProfile failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 12. GET /artisan/wallet
+#     Wallet balance + recent transactions
+# ============================================================
+
+def getWallet(event, context):
+    """
+    GET /artisan/wallet?page=1&limit=20
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        artisan_id = artisan["artisan_id"]
+        params = event.get("queryStringParameters") or {}
+        page = max(int(params.get("page", 1)), 1)
+        limit = min(int(params.get("limit", 20)), 100)
+        offset = (page - 1) * limit
+
+        connection.ping(reconnect=True)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            # Wallet balance
+            cursor.execute("""
+                SELECT wallet_id, available_balance, pending_balance,
+                       total_withdrawn, currency, is_locked
+                FROM tbl_wallets
+                WHERE artisan_id = %s
+            """, (artisan_id,))
+            wallet = cursor.fetchone()
+
+            if not wallet:
+                return construct_response(HTTP_OK, {
+                    "success": True,
+                    "data": {
+                        "wallet": {
+                            "available_balance": 0,
+                            "pending_balance": 0,
+                            "total_withdrawn": 0,
+                            "currency": "NGN"
+                        },
+                        "transactions": [],
+                        "pagination": {"page": 1, "limit": limit, "total": 0}
+                    }
+                })
+
+            # Transaction count
+            cursor.execute("""
+                SELECT COUNT(*) AS total
+                FROM tbl_wallet_transactions
+                WHERE artisan_id = %s
+            """, (artisan_id,))
+            total = cursor.fetchone()["total"]
+
+            # Transactions (paginated)
+            cursor.execute("""
+                SELECT id, type, category, amount, balance_before,
+                       balance_after, description, status, created_at
+                FROM tbl_wallet_transactions
+                WHERE artisan_id = %s
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+            """, (artisan_id, limit, offset))
+            transactions = cursor.fetchall()
+
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "data": {
+                "wallet": wallet,
+                "transactions": transactions,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total
+                }
+            }
+        })
+
+    except Exception as e:
+        logger.exception("getWallet failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 13. POST /artisan/wallet/withdraw
+#     Request withdrawal from wallet
+# ============================================================
+
+def requestWithdrawal(event, context):
+    """
+    POST /artisan/wallet/withdraw
+    Body: { "amount": 5000.00 }
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        artisan_id = artisan["artisan_id"]
+        body = parse_body(event)
+        amount = body.get("amount")
+
+        if not amount or float(amount) <= 0:
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "A valid positive amount is required."
+            })
+
+        amount = float(amount)
+        MIN_WITHDRAWAL = 1000  # NGN
+
+        if amount < MIN_WITHDRAWAL:
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": f"Minimum withdrawal is ₦{MIN_WITHDRAWAL:,.0f}."
+            })
+
+        connection.ping(reconnect=True)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            # Check wallet balance
+            cursor.execute("""
+                SELECT wallet_id, available_balance, is_locked
+                FROM tbl_wallets
+                WHERE artisan_id = %s
+                FOR UPDATE
+            """, (artisan_id,))
+            wallet = cursor.fetchone()
+
+            if not wallet:
+                return construct_response(HTTP_BAD_REQUEST, {
+                    "success": False,
+                    "message": "Wallet not found."
+                })
+
+            if wallet["is_locked"]:
+                return construct_response(HTTP_FORBIDDEN, {
+                    "success": False,
+                    "message": "Your wallet is currently locked. Contact support."
+                })
+
+            available = float(wallet["available_balance"])
+            if amount > available:
+                return construct_response(HTTP_BAD_REQUEST, {
+                    "success": False,
+                    "message": f"Insufficient balance. Available: ₦{available:,.2f}"
+                })
+
+            # Debit wallet
+            new_balance = available - amount
+            cursor.execute("""
+                UPDATE tbl_wallets
+                SET available_balance = %s,
+                    total_withdrawn = total_withdrawn + %s,
+                    last_transaction_at = NOW(),
+                    updated_at = NOW()
+                WHERE artisan_id = %s
+            """, (new_balance, amount, artisan_id))
+
+            # Record transaction
+            cursor.execute("""
+                INSERT INTO tbl_wallet_transactions (
+                    wallet_id, artisan_id, type, category, amount,
+                    balance_before, balance_after, description, status, created_at
+                ) VALUES (%s, %s, 'debit', 'withdrawal', %s, %s, %s,
+                          'Wallet withdrawal', 'pending', NOW())
+            """, (wallet["wallet_id"], artisan_id, amount, available, new_balance))
+
+            connection.commit()
+
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "message": "Withdrawal request submitted.",
+            "data": {
+                "amount": amount,
+                "new_balance": new_balance,
+                "status": "pending"
+            }
+        })
+
+    except Exception as e:
+        try:
+            connection.rollback()
+        except:
+            pass
+        logger.exception("requestWithdrawal failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 14. GET /artisan/support-tickets
+#     List support tickets
+# ============================================================
+
+def getSupportTickets(event, context):
+    """
+    GET /artisan/support-tickets?status=open|in_progress|resolved|closed&page=1&limit=20
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        artisan_id = artisan["artisan_id"]
+        params = event.get("queryStringParameters") or {}
+        status_filter = params.get("status")
+        page = max(int(params.get("page", 1)), 1)
+        limit = min(int(params.get("limit", 20)), 100)
+        offset = (page - 1) * limit
+
+        connection.ping(reconnect=True)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            base_query = """
+                FROM tbl_support_tickets
+                WHERE artisan_id = %s
+            """
+            query_params = [artisan_id]
+
+            if status_filter:
+                base_query += " AND status = %s"
+                query_params.append(status_filter)
+
+            # Count
+            cursor.execute(f"SELECT COUNT(*) AS total {base_query}", query_params)
+            total = cursor.fetchone()["total"]
+
+            # Fetch
+            cursor.execute(f"""
+                SELECT id, subject, description, category, priority,
+                       status, created_at, resolved_at
+                {base_query}
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+            """, (*query_params, limit, offset))
+            tickets = cursor.fetchall()
+
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "data": {
+                "tickets": tickets,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total
+                }
+            }
+        })
+
+    except Exception as e:
+        logger.exception("getSupportTickets failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 15. POST /artisan/support-tickets
+#     Create a new support ticket
+# ============================================================
+
+def createSupportTicket(event, context):
+    """
+    POST /artisan/support-tickets
+    Body: { "subject": "...", "description": "...", "category": "payment", "priority": "high" }
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        body = parse_body(event)
+        subject = body.get("subject", "").strip()
+        description = body.get("description", "").strip()
+        category = body.get("category", "general")
+        priority = body.get("priority", "medium")
+
+        if not subject or not description:
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "subject and description are required."
+            })
+
+        valid_categories = ["general", "payment", "technical", "account", "dispute"]
+        valid_priorities = ["low", "medium", "high", "urgent"]
+
+        if category not in valid_categories:
+            category = "general"
+        if priority not in valid_priorities:
+            priority = "medium"
+
+        connection.ping(reconnect=True)
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO tbl_support_tickets (
+                    artisan_id, subject, description, category, priority,
+                    status, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, 'open', NOW(), NOW())
+            """, (artisan["artisan_id"], subject, description, category, priority))
+            ticket_id = cursor.lastrowid
+            connection.commit()
+
+        return construct_response(HTTP_CREATED, {
+            "success": True,
+            "message": "Support ticket created.",
+            "ticket_id": ticket_id
+        })
+
+    except Exception as e:
+        logger.exception("createSupportTicket failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 16. GET /artisan/support-tickets/{ticketId}/messages
+#     Get messages for a ticket
+# ============================================================
+
+def getTicketMessages(event, context):
+    """
+    GET /artisan/support-tickets/{ticketId}/messages
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        path_params = event.get("pathParameters") or {}
+        ticket_id = path_params.get("ticketId")
+
+        if not ticket_id:
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "ticketId is required."
+            })
+
+        connection.ping(reconnect=True)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            # Verify ticket belongs to artisan
+            cursor.execute("""
+                SELECT id, subject, status
+                FROM tbl_support_tickets
+                WHERE id = %s AND artisan_id = %s
+            """, (ticket_id, artisan["artisan_id"]))
+            ticket = cursor.fetchone()
+
+            if not ticket:
+                return construct_response(HTTP_NOT_FOUND, {
+                    "success": False,
+                    "message": "Ticket not found."
+                })
+
+            # Get messages
+            cursor.execute("""
+                SELECT id, sender_type, sender_id, message, attachments,
+                       is_read, created_at
+                FROM tbl_support_messages
+                WHERE ticket_id = %s
+                ORDER BY created_at ASC
+            """, (ticket_id,))
+            messages = cursor.fetchall()
+
+            # Mark messages as read
+            cursor.execute("""
+                UPDATE tbl_support_messages
+                SET is_read = 1
+                WHERE ticket_id = %s AND sender_type != 'artisan' AND is_read = 0
+            """, (ticket_id,))
+            connection.commit()
+
+        return construct_response(HTTP_OK, {
+            "success": True,
+            "data": {
+                "ticket": ticket,
+                "messages": messages
+            }
+        })
+
+    except Exception as e:
+        logger.exception("getTicketMessages failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
+        })
+
+
+# ============================================================
+# 17. POST /artisan/support-tickets/{ticketId}/messages
+#     Send a message on a ticket
+# ============================================================
+
+def sendTicketMessage(event, context):
+    """
+    POST /artisan/support-tickets/{ticketId}/messages
+    Body: { "message": "..." }
+    """
+    try:
+        artisan = get_artisan_from_token(event)
+        if not artisan:
+            return construct_response(HTTP_NOT_FOUND, {
+                "success": False,
+                "message": "Artisan profile not found."
+            })
+
+        path_params = event.get("pathParameters") or {}
+        ticket_id = path_params.get("ticketId")
+        body = parse_body(event)
+        message_text = body.get("message", "").strip()
+
+        if not ticket_id:
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "ticketId is required."
+            })
+
+        if not message_text:
+            return construct_response(HTTP_BAD_REQUEST, {
+                "success": False,
+                "message": "message is required."
+            })
+
+        connection.ping(reconnect=True)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+
+            # Verify ticket belongs to artisan
+            cursor.execute("""
+                SELECT id, status FROM tbl_support_tickets
+                WHERE id = %s AND artisan_id = %s
+            """, (ticket_id, artisan["artisan_id"]))
+            ticket = cursor.fetchone()
+
+            if not ticket:
+                return construct_response(HTTP_NOT_FOUND, {
+                    "success": False,
+                    "message": "Ticket not found."
+                })
+
+            if ticket["status"] == "closed":
+                return construct_response(HTTP_BAD_REQUEST, {
+                    "success": False,
+                    "message": "Cannot send messages on a closed ticket."
+                })
+
+            # Insert message
+            cursor.execute("""
+                INSERT INTO tbl_support_messages (
+                    ticket_id, sender_type, sender_id, message, created_at
+                ) VALUES (%s, 'artisan', %s, %s, NOW())
+            """, (ticket_id, artisan["artisan_id"], message_text))
+            message_id = cursor.lastrowid
+
+            # Update ticket status if it was waiting on user
+            if ticket["status"] == "waiting_on_user":
+                cursor.execute("""
+                    UPDATE tbl_support_tickets
+                    SET status = 'in_progress', updated_at = NOW()
+                    WHERE id = %s
+                """, (ticket_id,))
+
+            connection.commit()
+
+        return construct_response(HTTP_CREATED, {
+            "success": True,
+            "message": "Message sent.",
+            "message_id": message_id
+        })
+
+    except Exception as e:
+        logger.exception("sendTicketMessage failed")
+        return construct_response(HTTP_INTERNAL_ERROR, {
+            "success": False,
+            "message": "Internal server error.",
+            "error": str(e)
         })

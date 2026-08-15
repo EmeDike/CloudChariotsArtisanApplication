@@ -78,7 +78,6 @@ functions:
           path: /verifyOtp
           method: post
 
-  # === PROTECTED (with authorizer) ===
   getArtiAvail:
     handler: handler.getArtiAvail
     events:
@@ -141,6 +140,160 @@ functions:
           method: post
           authorizer:
             name: cognitoAuthorizer
+
+  getDashboard:
+    handler: artisan_dashboard.getDashboard
+    events:
+      - httpApi:
+          path: /artisan/dashboard
+          method: GET
+          authorizer:
+            name: cognitoAuthorizer
+
+
+  toggleAvailability:
+    handler: artisan_dashboard.toggleAvailability
+    events:
+      - httpApi:
+          path: /artisan/toggle-availability
+          method: PUT
+          authorizer:
+            name: cognitoAuthorizer
+
+    getEarnings:
+      handler: artisan_dashboard.getEarnings
+      events:
+        - httpApi:
+            path: /artisan/earnings
+            method: GET
+            authorizer:
+              name: cognitoAuthorizer
+
+    getJobs:
+      handler: artisan_dashboard.getJobs
+      events:
+        - httpApi:
+            path: /artisan/jobs
+            method: GET
+            authorizer:
+              name: cognitoAuthorizer
+
+    getJobRequests:
+      handler: artisan_dashboard.getJobRequests
+      events:
+        - httpApi:
+            path: /artisan/job-requests
+            method: GET
+            authorizer:
+              name: cognitoAuthorizer
+
+    respondToJobRequest:
+      handler: artisan_dashboard.respondToJobRequest
+      events:
+        - httpApi:
+            path: /artisan/job-requests/{jobRequestId}/respond
+            method: PUT
+            authorizer:
+              name: cognitoAuthorizer
+
+    getReviews:
+      handler: artisan_dashboard.getReviews
+      events:
+        - httpApi:
+            path: /artisan/reviews
+            method: GET
+            authorizer:
+              name: cognitoAuthorizer
+
+    getNotifications:
+      handler: artisan_dashboard.getNotifications
+      events:
+        - httpApi:
+            path: /artisan/notifications
+            method: GET
+            authorizer:
+              name: cognitoAuthorizer
+
+    markNotificationsRead:
+      handler: artisan_dashboard.markNotificationsRead
+      events:
+        - httpApi:
+            path: /artisan/notifications/mark-read
+            method: PUT
+            authorizer:
+              name: cognitoAuthorizer
+
+    getProfile:
+      handler: artisan_dashboard.getProfile
+      events:
+        - httpApi:
+            path: /artisan/profile
+            method: GET
+            authorizer:
+              name: cognitoAuthorizer
+
+    updateProfile:
+      handler: artisan_dashboard.updateProfile
+      events:
+        - httpApi:
+            path: /artisan/profile
+            method: PUT
+            authorizer:
+              name: cognitoAuthorizer
+
+    getWallet:
+      handler: artisan_dashboard.getWallet
+      events:
+        - httpApi:
+            path: /artisan/wallet
+            method: GET
+            authorizer:
+              name: cognitoAuthorizer
+
+    requestWithdrawal:
+      handler: artisan_dashboard.requestWithdrawal
+      events:
+        - httpApi:
+            path: /artisan/wallet/withdraw
+            method: POST
+            authorizer:
+              name: cognitoAuthorizer
+
+    getSupportTickets:
+      handler: artisan_dashboard.getSupportTickets
+      events:
+        - httpApi:
+            path: /artisan/support-tickets
+            method: GET
+            authorizer:
+              name: cognitoAuthorizer
+
+    createSupportTicket:
+      handler: artisan_dashboard.createSupportTicket
+      events:
+        - httpApi:
+            path: /artisan/support-tickets
+            method: POST
+            authorizer:
+              name: cognitoAuthorizer
+
+    getTicketMessages:
+      handler: artisan_dashboard.getTicketMessages
+      events:
+        - httpApi:
+            path: /artisan/support-tickets/{ticketId}/messages
+            method: GET
+            authorizer:
+              name: cognitoAuthorizer
+
+    sendTicketMessage:
+      handler: artisan_dashboard.sendTicketMessage
+      events:
+        - httpApi:
+            path: /artisan/support-tickets/{ticketId}/messages
+            method: POST
+            authorizer:
+              name: cognitoAuthorizer
 
 plugins:
   - serverless-python-requirements
