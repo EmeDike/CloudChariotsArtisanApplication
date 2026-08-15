@@ -2416,12 +2416,6 @@ def getEarnings(event, context):
             "error": str(e)
         })
 
-
-# ============================================================
-# 4. GET /artisan/jobs
-#    All jobs with status filter
-# ============================================================
-
 def getJobs(event, context):
     """
     GET /artisan/jobs?status=pending|confirmed|in_progress|completed|cancelled&page=1&limit=20

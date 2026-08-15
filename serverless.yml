@@ -142,7 +142,7 @@ functions:
             name: cognitoAuthorizer
 
   getDashboard:
-    handler: artisan_dashboard.getDashboard
+    handler: handler.getDashboard
     events:
       - httpApi:
           path: /artisan/dashboard
@@ -152,7 +152,7 @@ functions:
 
 
   toggleAvailability:
-    handler: artisan_dashboard.toggleAvailability
+    handler: handler.toggleAvailability
     events:
       - httpApi:
           path: /artisan/toggle-availability
@@ -161,7 +161,7 @@ functions:
             name: cognitoAuthorizer
 
   getEarnings:
-    handler: artisan_dashboard.getEarnings
+    handler: handler.getEarnings
     events:
       - httpApi:
           path: /artisan/earnings
@@ -170,7 +170,7 @@ functions:
             name: cognitoAuthorizer
 
   getJobs:
-    handler: artisan_dashboard.getJobs
+    handler: handler.getJobs
     events:
       - httpApi:
           path: /artisan/jobs
@@ -179,7 +179,7 @@ functions:
             name: cognitoAuthorizer
 
   getJobRequests:
-    handler: artisan_dashboard.getJobRequests
+    handler: handler.getJobRequests
     events:
       - httpApi:
           path: /artisan/job-requests
@@ -188,7 +188,7 @@ functions:
             name: cognitoAuthorizer
 
   respondToJobRequest:
-    handler: artisan_dashboard.respondToJobRequest
+    handler: handler.respondToJobRequest
     events:
       - httpApi:
           path: /artisan/job-requests/{jobRequestId}/respond
@@ -197,7 +197,7 @@ functions:
             name: cognitoAuthorizer
 
   getReviews:
-    handler: artisan_dashboard.getReviews
+    handler: handler.getReviews
     events:
       - httpApi:
           path: /artisan/reviews
@@ -206,7 +206,7 @@ functions:
             name: cognitoAuthorizer
 
   getNotifications:
-    handler: artisan_dashboard.getNotifications
+    handler: handler.getNotifications
     events:
       - httpApi:
           path: /artisan/notifications
@@ -215,7 +215,7 @@ functions:
             name: cognitoAuthorizer
 
   markNotificationsRead:
-    handler: artisan_dashboard.markNotificationsRead
+    handler: handler.markNotificationsRead
     events:
       - httpApi:
           path: /artisan/notifications/mark-read
@@ -224,7 +224,7 @@ functions:
             name: cognitoAuthorizer
 
   getProfile:
-    handler: artisan_dashboard.getProfile
+    handler: handler.getProfile
     events:
       - httpApi:
           path: /artisan/profile
@@ -233,7 +233,7 @@ functions:
             name: cognitoAuthorizer
 
   updateProfile:
-    handler: artisan_dashboard.updateProfile
+    handler: handler.updateProfile
     events:
       - httpApi:
           path: /artisan/profile
@@ -242,7 +242,7 @@ functions:
             name: cognitoAuthorizer
 
   getWallet:
-    handler: artisan_dashboard.getWallet
+    handler: handler.getWallet
     events:
       - httpApi:
           path: /artisan/wallet
@@ -251,7 +251,7 @@ functions:
             name: cognitoAuthorizer
 
   requestWithdrawal:
-    handler: artisan_dashboard.requestWithdrawal
+    handler: handler.requestWithdrawal
     events:
       - httpApi:
           path: /artisan/wallet/withdraw
@@ -260,7 +260,7 @@ functions:
             name: cognitoAuthorizer
 
   getSupportTickets:
-    handler: artisan_dashboard.getSupportTickets
+    handler: handler.getSupportTickets
     events:
       - httpApi:
           path: /artisan/support-tickets
@@ -269,7 +269,7 @@ functions:
             name: cognitoAuthorizer
 
   createSupportTicket:
-    handler: artisan_dashboard.createSupportTicket
+    handler: handler.createSupportTicket
     events:
       - httpApi:
           path: /artisan/support-tickets
@@ -278,7 +278,7 @@ functions:
             name: cognitoAuthorizer
 
   getTicketMessages:
-    handler: artisan_dashboard.getTicketMessages
+    handler: handler.getTicketMessages
     events:
       - httpApi:
           path: /artisan/support-tickets/{ticketId}/messages
@@ -287,7 +287,7 @@ functions:
             name: cognitoAuthorizer
 
   sendTicketMessage:
-    handler: artisan_dashboard.sendTicketMessage
+    handler: handler.sendTicketMessage
     events:
       - httpApi:
           path: /artisan/support-tickets/{ticketId}/messages
