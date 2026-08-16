@@ -2035,6 +2035,7 @@ def updateArtisanAvailability(event, context):
             "details": str(e)
         })
 
+
 def getDashboard(event, context):
     """
     GET /artisan/dashboard
@@ -2073,7 +2074,7 @@ def getDashboard(event, context):
                 SELECT COALESCE(SUM(net_amount), 0) AS total
                 FROM tbl_payments
                 WHERE artisan_id = %s
-                  AND status = 'completed'
+                  AND status = 'successful'
                   AND DATE(paid_at) = %s
             """, (artisan_id, today))
             earnings_today = cursor.fetchone()["total"]
@@ -2083,7 +2084,7 @@ def getDashboard(event, context):
                 SELECT COALESCE(SUM(net_amount), 0) AS total
                 FROM tbl_payments
                 WHERE artisan_id = %s
-                  AND status = 'completed'
+                  AND status = 'successful'
                   AND paid_at >= %s
             """, (artisan_id, week_start))
             earnings_week = cursor.fetchone()["total"]
@@ -2093,7 +2094,7 @@ def getDashboard(event, context):
                 SELECT COALESCE(SUM(net_amount), 0) AS total
                 FROM tbl_payments
                 WHERE artisan_id = %s
-                  AND status = 'completed'
+                  AND status = 'successful'
                   AND paid_at >= %s
             """, (artisan_id, month_start))
             earnings_month = cursor.fetchone()["total"]
@@ -2105,18 +2106,19 @@ def getDashboard(event, context):
                        COALESCE(SUM(net_amount), 0) AS total
                 FROM tbl_payments
                 WHERE artisan_id = %s
-                  AND status = 'completed'
+                  AND status = 'successful'
                   AND paid_at >= %s
                 GROUP BY DATE(paid_at), DAYNAME(paid_at)
                 ORDER BY DATE(paid_at)
             """, (artisan_id, week_start))
             weekly_breakdown = cursor.fetchall()
 
-            # ---- Job Stats ----
+            # ---- Job Stats (from both job_requests and bookings) ----
             cursor.execute("""
                 SELECT
                     SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_requests,
-                    SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END) AS accepted_requests
+                    SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END) AS accepted_requests,
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_from_requests
                 FROM tbl_job_requests
                 WHERE artisan_id = %s
             """, (artisan_id,))
@@ -2127,12 +2129,43 @@ def getDashboard(event, context):
                     SUM(CASE WHEN booking_status = 'pending' THEN 1 ELSE 0 END) AS pending_bookings,
                     SUM(CASE WHEN booking_status = 'confirmed' THEN 1 ELSE 0 END) AS confirmed_bookings,
                     SUM(CASE WHEN booking_status = 'in_progress' THEN 1 ELSE 0 END) AS active_jobs,
-                    SUM(CASE WHEN booking_status = 'completed' THEN 1 ELSE 0 END) AS completed_jobs,
+                    SUM(CASE WHEN booking_status = 'completed' THEN 1 ELSE 0 END) AS completed_bookings,
                     SUM(CASE WHEN booking_status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_jobs
                 FROM tbl_bookings
                 WHERE artisan_id = %s
             """, (artisan_id,))
             booking_stats = cursor.fetchone()
+
+            # Calculate total completed jobs from both tables
+            completed_from_requests = int(request_stats["completed_from_requests"] or 0)
+            completed_from_bookings = int(booking_stats["completed_bookings"] or 0)
+            total_completed = completed_from_requests + completed_from_bookings
+
+            # ---- Completion Rate ----
+            cursor.execute("""
+                SELECT COUNT(*) AS total_jobs
+                FROM tbl_job_requests
+                WHERE artisan_id = %s
+                  AND status IN ('completed', 'accepted', 'in_progress', 'cancelled')
+            """, (artisan_id,))
+            total_jobs = cursor.fetchone()["total_jobs"]
+            completion_rate = round((total_completed / total_jobs * 100), 1) if total_jobs > 0 else 0
+
+            # ---- Response Rate & Avg Response Time ----
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) AS total_requests,
+                    SUM(CASE WHEN status IN ('accepted', 'completed', 'in_progress') THEN 1 ELSE 0 END) AS responded,
+                    AVG(TIMESTAMPDIFF(MINUTE, created_at, updated_at)) AS avg_response_minutes
+                FROM tbl_job_requests
+                WHERE artisan_id = %s
+                  AND status != 'pending'
+            """, (artisan_id,))
+            response_data = cursor.fetchone()
+            total_requests = int(response_data["total_requests"] or 0)
+            responded = int(response_data["responded"] or 0)
+            response_rate = round((responded / total_requests * 100), 1) if total_requests > 0 else 0
+            avg_response_time = int(response_data["avg_response_minutes"] or 0)
 
             # ---- Upcoming Bookings (next 5) ----
             cursor.execute("""
@@ -2219,8 +2252,13 @@ def getDashboard(event, context):
                     "pending_bookings": int(booking_stats["pending_bookings"] or 0),
                     "confirmed_bookings": int(booking_stats["confirmed_bookings"] or 0),
                     "active_jobs": int(booking_stats["active_jobs"] or 0),
-                    "completed_jobs": int(booking_stats["completed_jobs"] or 0),
-                    "cancelled_jobs": int(booking_stats["cancelled_jobs"] or 0)
+                    "completed_jobs": total_completed,
+                    "cancelled_jobs": int(booking_stats["cancelled_jobs"] or 0),
+                    "completion_rate": completion_rate
+                },
+                "response": {
+                    "response_rate": response_rate,
+                    "avg_response_time_minutes": avg_response_time
                 },
                 "upcoming_bookings": upcoming_bookings,
                 "pending_requests": pending_requests,
