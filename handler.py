@@ -2485,7 +2485,7 @@ def getJobs(event, context):
         connection.ping(reconnect=True)
         with connection.cursor(pymysql.cursors.DictCursor) as cursor:
 
-            # Build query
+            # Build query - using LEFT JOIN so bookings show even if customer user is missing
             base_query = """
                 SELECT b.booking_id, b.job_request_id, b.booking_date,
                        b.service_address, b.agreed_amount, b.booking_status,
@@ -2494,7 +2494,7 @@ def getJobs(event, context):
                        u.last_name AS customer_last_name,
                        u.phone_number AS customer_phone
                 FROM tbl_bookings b
-                INNER JOIN tbl_users u ON u.user_id = b.customer_id
+                LEFT JOIN tbl_users u ON u.user_id = b.customer_id
                 WHERE b.artisan_id = %s
             """
             query_params = [artisan_id]
@@ -2533,7 +2533,6 @@ def getJobs(event, context):
             "message": "Internal server error.",
             "error": str(e)
         })
-
 
 # ============================================================
 # 5. GET /artisan/job-requests
