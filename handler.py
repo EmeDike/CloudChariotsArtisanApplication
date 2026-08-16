@@ -2334,6 +2334,7 @@ def toggleAvailability(event, context):
 #    Detailed earnings with filters
 # ============================================================
 
+
 def getEarnings(event, context):
     """
     GET /artisan/earnings?period=week|month|year|all&page=1&limit=20
@@ -2377,14 +2378,14 @@ def getEarnings(event, context):
                     SELECT COALESCE(SUM(net_amount), 0) AS total_earnings,
                            COUNT(*) AS total_transactions
                     FROM tbl_payments
-                    WHERE artisan_id = %s AND status = 'completed' AND paid_at >= %s
+                    WHERE artisan_id = %s AND status = 'successful' AND paid_at >= %s
                 """, (artisan_id, date_filter))
             else:
                 cursor.execute("""
                     SELECT COALESCE(SUM(net_amount), 0) AS total_earnings,
                            COUNT(*) AS total_transactions
                     FROM tbl_payments
-                    WHERE artisan_id = %s AND status = 'completed'
+                    WHERE artisan_id = %s AND status = 'successful'
                 """, (artisan_id,))
 
             summary = cursor.fetchone()
@@ -2392,29 +2393,35 @@ def getEarnings(event, context):
             # Transaction list (paginated)
             if date_filter:
                 cursor.execute("""
-                    SELECT p.payment_id, p.amount, p.platform_fee, p.net_amount,
-                           p.payment_method, p.status, p.description, p.paid_at,
-                           b.booking_id, b.customer_notes,
+                    SELECT p.payment_id, p.amount, p.net_amount,
+                           (p.amount - p.net_amount) AS platform_fee,
+                           p.payment_method, p.payment_provider,
+                           p.payment_reference, p.status, p.paid_at,
+                           jr.job_request_id, jr.title AS job_title,
+                           jr.description AS job_description,
                            u.first_name AS customer_first_name,
                            u.last_name AS customer_last_name
                     FROM tbl_payments p
-                    LEFT JOIN tbl_bookings b ON b.booking_id = p.booking_id
-                    LEFT JOIN tbl_users u ON u.user_id = p.customer_id
-                    WHERE p.artisan_id = %s AND p.status = 'completed' AND p.paid_at >= %s
+                    LEFT JOIN tbl_job_requests jr ON jr.job_request_id = p.job_request_id
+                    LEFT JOIN tbl_users u ON u.user_id = p.payer_user_id
+                    WHERE p.artisan_id = %s AND p.status = 'successful' AND p.paid_at >= %s
                     ORDER BY p.paid_at DESC
                     LIMIT %s OFFSET %s
                 """, (artisan_id, date_filter, limit, offset))
             else:
                 cursor.execute("""
-                    SELECT p.payment_id, p.amount, p.platform_fee, p.net_amount,
-                           p.payment_method, p.status, p.description, p.paid_at,
-                           b.booking_id, b.customer_notes,
+                    SELECT p.payment_id, p.amount, p.net_amount,
+                           (p.amount - p.net_amount) AS platform_fee,
+                           p.payment_method, p.payment_provider,
+                           p.payment_reference, p.status, p.paid_at,
+                           jr.job_request_id, jr.title AS job_title,
+                           jr.description AS job_description,
                            u.first_name AS customer_first_name,
                            u.last_name AS customer_last_name
                     FROM tbl_payments p
-                    LEFT JOIN tbl_bookings b ON b.booking_id = p.booking_id
-                    LEFT JOIN tbl_users u ON u.user_id = p.customer_id
-                    WHERE p.artisan_id = %s AND p.status = 'completed'
+                    LEFT JOIN tbl_job_requests jr ON jr.job_request_id = p.job_request_id
+                    LEFT JOIN tbl_users u ON u.user_id = p.payer_user_id
+                    WHERE p.artisan_id = %s AND p.status = 'successful'
                     ORDER BY p.paid_at DESC
                     LIMIT %s OFFSET %s
                 """, (artisan_id, limit, offset))
@@ -2453,6 +2460,8 @@ def getEarnings(event, context):
             "message": "Internal server error.",
             "error": str(e)
         })
+
+
 
 def getJobs(event, context):
     """
