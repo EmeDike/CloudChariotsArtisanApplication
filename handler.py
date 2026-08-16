@@ -2463,6 +2463,7 @@ def getEarnings(event, context):
 
 
 
+
 def getJobs(event, context):
     """GET /artisan/jobs?status=pending|confirmed|scheduled|in_progress|completed|cancelled|upcoming&page=1&limit=20"""
     try:
@@ -2497,8 +2498,9 @@ def getJobs(event, context):
             query_params = [artisan_id]
 
             # === FIX: Handle 'upcoming' as a virtual status ===
+            # Added 'pending' to include pending bookings with future dates
             if status_filter == "upcoming":
-                base_query += " AND b.booking_status IN ('scheduled', 'confirmed') AND b.booking_date >= NOW()"
+                base_query += " AND b.booking_status IN ('pending', 'scheduled', 'confirmed') AND b.booking_date >= NOW()"
             elif status_filter:
                 base_query += " AND b.booking_status = %s"
                 query_params.append(status_filter)
@@ -2542,13 +2544,13 @@ def getJobs(event, context):
         })
 
 
+
 # ============================================================
 # FIX 2: getJobRequests - Ensure it returns pending requests correctly
 # Endpoint: GET /artisan/job-requests?status=pending|accepted|declined
 # ============================================================
 
 def getJobRequests(event, context):
-    """GET /artisan/job-requests?status=pending|accepted|declined&page=1&limit=20"""
     try:
         artisan = get_artisan_from_token(event)
         if not artisan:
@@ -2559,7 +2561,7 @@ def getJobRequests(event, context):
 
         artisan_id = artisan["artisan_id"]
         params = event.get("queryStringParameters") or {}
-        status_filter = params.get("status", "pending")  # Default to 'pending'
+        status_filter = params.get("status", "pending")
         page = max(int(params.get("page", 1)), 1)
         limit = min(int(params.get("limit", 20)), 100)
         offset = (page - 1) * limit
@@ -2567,19 +2569,32 @@ def getJobRequests(event, context):
         connection.ping(reconnect=True)
         with connection.cursor(pymysql.cursors.DictCursor) as cursor:
 
-            # Count total
+            # ============================================================
+            # COUNT QUERY — changed WHERE clause
+            # ============================================================
             cursor.execute("""
                 SELECT COUNT(*) AS total
-                FROM tbl_job_requests
-                WHERE artisan_id = %s AND status = %s
-            """, (artisan_id, status_filter))
+                FROM tbl_job_requests jr
+                WHERE jr.status = %s
+                  AND (
+                    jr.artisan_id = %s
+                    OR (
+                      jr.artisan_id IS NULL
+                      AND jr.service_id IN (
+                        SELECT service_id FROM tbl_artisan_services WHERE artisan_id = %s
+                      )
+                    )
+                  )
+            """, (status_filter, artisan_id, artisan_id))
             total = cursor.fetchone()["total"]
 
-            # Fetch requests with customer and service details
+            # ============================================================
+            # FETCH QUERY — same WHERE clause change
+            # ============================================================
             cursor.execute("""
                 SELECT jr.job_request_id, jr.customer_id, jr.service_id,
                        jr.title, jr.description, jr.location_address,
-                       jr.preferred_date, jr.status, jr.created_at,
+                       jr.preferred_date, jr.budget, jr.status, jr.created_at,
                        u.first_name AS customer_first_name,
                        u.last_name AS customer_last_name,
                        u.phone_number AS customer_phone,
@@ -2587,10 +2602,19 @@ def getJobRequests(event, context):
                 FROM tbl_job_requests jr
                 INNER JOIN tbl_users u ON u.user_id = jr.customer_id
                 LEFT JOIN services s ON s.id = jr.service_id
-                WHERE jr.artisan_id = %s AND jr.status = %s
+                WHERE jr.status = %s
+                  AND (
+                    jr.artisan_id = %s
+                    OR (
+                      jr.artisan_id IS NULL
+                      AND jr.service_id IN (
+                        SELECT service_id FROM tbl_artisan_services WHERE artisan_id = %s
+                      )
+                    )
+                  )
                 ORDER BY jr.created_at DESC
                 LIMIT %s OFFSET %s
-            """, (artisan_id, status_filter, limit, offset))
+            """, (status_filter, artisan_id, artisan_id, limit, offset))
             requests = cursor.fetchall()
 
             # Serialize dates
@@ -2619,11 +2643,6 @@ def getJobRequests(event, context):
             "error": str(e)
         })
 
-
-# ============================================================
-# 6. PUT /artisan/job-requests/{jobRequestId}/respond
-#    Accept or decline a job request
-# ============================================================
 
 def respondToJobRequest(event, context):
     """
