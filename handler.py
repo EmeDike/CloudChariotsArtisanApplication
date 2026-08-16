@@ -2464,9 +2464,7 @@ def getEarnings(event, context):
 
 
 def getJobs(event, context):
-    """
-    GET /artisan/jobs?status=pending|confirmed|in_progress|completed|cancelled&page=1&limit=20
-    """
+    """GET /artisan/jobs?status=pending|confirmed|scheduled|in_progress|completed|cancelled|upcoming&page=1&limit=20"""
     try:
         artisan = get_artisan_from_token(event)
         if not artisan:
@@ -2477,7 +2475,7 @@ def getJobs(event, context):
 
         artisan_id = artisan["artisan_id"]
         params = event.get("queryStringParameters") or {}
-        status_filter = params.get("status")
+        status_filter = params.get("status", None)
         page = max(int(params.get("page", 1)), 1)
         limit = min(int(params.get("limit", 20)), 100)
         offset = (page - 1) * limit
@@ -2485,7 +2483,6 @@ def getJobs(event, context):
         connection.ping(reconnect=True)
         with connection.cursor(pymysql.cursors.DictCursor) as cursor:
 
-            # Build query - using LEFT JOIN so bookings show even if customer user is missing
             base_query = """
                 SELECT b.booking_id, b.job_request_id, b.booking_date,
                        b.service_address, b.agreed_amount, b.booking_status,
@@ -2494,37 +2491,47 @@ def getJobs(event, context):
                        u.last_name AS customer_last_name,
                        u.phone_number AS customer_phone
                 FROM tbl_bookings b
-                LEFT JOIN tbl_users u ON u.user_id = b.customer_id
+                INNER JOIN tbl_users u ON u.user_id = b.customer_id
                 WHERE b.artisan_id = %s
             """
             query_params = [artisan_id]
 
-            if status_filter:
+            # === FIX: Handle 'upcoming' as a virtual status ===
+            if status_filter == "upcoming":
+                base_query += " AND b.booking_status IN ('scheduled', 'confirmed') AND b.booking_date >= NOW()"
+            elif status_filter:
                 base_query += " AND b.booking_status = %s"
                 query_params.append(status_filter)
 
             # Count total
-            count_query = f"SELECT COUNT(*) AS total FROM ({base_query}) AS sub"
+            count_query = f"SELECT COUNT(*) AS total FROM ({base_query}) AS filtered"
             cursor.execute(count_query, query_params)
             total = cursor.fetchone()["total"]
 
-            # Fetch page
-            base_query += " ORDER BY b.created_at DESC LIMIT %s OFFSET %s"
+            # Add ordering and pagination
+            base_query += " ORDER BY b.booking_date ASC LIMIT %s OFFSET %s"
             query_params.extend([limit, offset])
+
             cursor.execute(base_query, query_params)
             bookings = cursor.fetchall()
 
-        return construct_response(HTTP_OK, {
-            "success": True,
-            "data": {
-                "bookings": bookings,
-                "pagination": {
-                    "page": page,
-                    "limit": limit,
-                    "total": total
+            # Serialize dates
+            for booking in bookings:
+                for key in ["booking_date", "created_at"]:
+                    if booking.get(key):
+                        booking[key] = booking[key].isoformat()
+
+            return construct_response(HTTP_OK, {
+                "success": True,
+                "data": {
+                    "bookings": bookings,
+                    "pagination": {
+                        "page": page,
+                        "limit": limit,
+                        "total": total
+                    }
                 }
-            }
-        })
+            })
 
     except Exception as e:
         logger.exception("getJobs failed")
@@ -2534,15 +2541,14 @@ def getJobs(event, context):
             "error": str(e)
         })
 
+
 # ============================================================
-# 5. GET /artisan/job-requests
-#    Pending job requests for the artisan
+# FIX 2: getJobRequests - Ensure it returns pending requests correctly
+# Endpoint: GET /artisan/job-requests?status=pending|accepted|declined
 # ============================================================
 
 def getJobRequests(event, context):
-    """
-    GET /artisan/job-requests?status=pending|accepted|declined&page=1&limit=20
-    """
+    """GET /artisan/job-requests?status=pending|accepted|declined&page=1&limit=20"""
     try:
         artisan = get_artisan_from_token(event)
         if not artisan:
@@ -2553,7 +2559,7 @@ def getJobRequests(event, context):
 
         artisan_id = artisan["artisan_id"]
         params = event.get("queryStringParameters") or {}
-        status_filter = params.get("status", "pending")
+        status_filter = params.get("status", "pending")  # Default to 'pending'
         page = max(int(params.get("page", 1)), 1)
         limit = min(int(params.get("limit", 20)), 100)
         offset = (page - 1) * limit
@@ -2561,6 +2567,7 @@ def getJobRequests(event, context):
         connection.ping(reconnect=True)
         with connection.cursor(pymysql.cursors.DictCursor) as cursor:
 
+            # Count total
             cursor.execute("""
                 SELECT COUNT(*) AS total
                 FROM tbl_job_requests
@@ -2568,6 +2575,7 @@ def getJobRequests(event, context):
             """, (artisan_id, status_filter))
             total = cursor.fetchone()["total"]
 
+            # Fetch requests with customer and service details
             cursor.execute("""
                 SELECT jr.job_request_id, jr.customer_id, jr.service_id,
                        jr.title, jr.description, jr.location_address,
@@ -2585,17 +2593,23 @@ def getJobRequests(event, context):
             """, (artisan_id, status_filter, limit, offset))
             requests = cursor.fetchall()
 
-        return construct_response(HTTP_OK, {
-            "success": True,
-            "data": {
-                "requests": requests,
-                "pagination": {
-                    "page": page,
-                    "limit": limit,
-                    "total": total
+            # Serialize dates
+            for req in requests:
+                for key in ["preferred_date", "created_at"]:
+                    if req.get(key):
+                        req[key] = req[key].isoformat()
+
+            return construct_response(HTTP_OK, {
+                "success": True,
+                "data": {
+                    "requests": requests,
+                    "pagination": {
+                        "page": page,
+                        "limit": limit,
+                        "total": total
+                    }
                 }
-            }
-        })
+            })
 
     except Exception as e:
         logger.exception("getJobRequests failed")
